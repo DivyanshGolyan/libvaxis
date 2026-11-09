@@ -184,6 +184,23 @@ pub fn build(b: *std.Build) void {
     // Tests
     const tests_step = b.step("test", "Run tests");
 
+    // This is a native executable, not a Zig test: App must use the real Tty.
+    const init_test = b.addExecutable(.{
+        .name = "app-init-test",
+        .use_llvm = use_llvm,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/testing/app_init.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "vaxis", .module = vaxis_mod }},
+        }),
+    });
+    const init_test_run = b.addSystemCommand(&.{"python3"});
+    init_test_run.addFileArg(b.path("src/testing/app_init.py"));
+    init_test_run.addArtifactArg(init_test);
+    b.step("test-app-init", "Check native POSIX terminal restoration after an init failure").dependOn(&init_test_run.step);
+
     const tests = b.addTest(.{
         .use_llvm = use_llvm,
         .root_module = b.createModule(.{

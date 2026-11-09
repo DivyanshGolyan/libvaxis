@@ -28,10 +28,12 @@ pub const Options = struct {
 /// object on the heap. Call destroy when the app is complete to reset terminal state and release
 /// resources
 pub fn init(io: std.Io, allocator: Allocator, env_map: *std.process.Environ.Map, buffer: []u8) !App {
+    var tty = try vaxis.Tty.init(io, buffer);
+    errdefer tty.deinit();
     return .{
         .io = io,
         .allocator = allocator,
-        .tty = try vaxis.Tty.init(io, buffer),
+        .tty = tty,
         .vx = try vaxis.init(io, allocator, env_map, .{
             .system_clipboard_allocator = allocator,
             .kitty_keyboard_flags = .{
