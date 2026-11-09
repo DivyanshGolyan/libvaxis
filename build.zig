@@ -215,6 +215,22 @@ pub fn build(b: *std.Build) void {
     init_test_run.addArtifactArg(init_test);
     b.step("test-app-init", "Check native POSIX terminal restoration after an init failure").dependOn(&init_test_run.step);
 
+    const eof_test = b.addExecutable(.{
+        .name = "app-eof-test",
+        .use_llvm = use_llvm,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/testing/app_eof.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "vaxis", .module = vaxis_mod }},
+        }),
+    });
+    const eof_test_run = b.addSystemCommand(&.{"python3"});
+    eof_test_run.addFileArg(b.path("src/testing/app_eof.py"));
+    eof_test_run.addArtifactArg(eof_test);
+    b.step("test-app-eof", "Check terminal EOF quits while callback EOF propagates").dependOn(&eof_test_run.step);
+
     const tests = b.addTest(.{
         .use_llvm = use_llvm,
         .root_module = b.createModule(.{
