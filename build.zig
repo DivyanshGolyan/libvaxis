@@ -223,6 +223,7 @@ pub fn build(b: *std.Build) void {
     });
     const c_api_tests = b.addTest(.{
         .use_llvm = use_llvm,
+        .filters = if (b.option([]const u8, "c-api-test-filter", "Run C API tests matching this substring")) |filter| &.{filter} else &.{},
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/c_api.zig"),
             .target = target,
@@ -235,7 +236,9 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    tests_step.dependOn(&b.addRunArtifact(c_api_tests).step);
+    const c_api_tests_run = b.addRunArtifact(c_api_tests);
+    tests_step.dependOn(&c_api_tests_run.step);
+    b.step("test-c-api", "Run C API unit tests").dependOn(&c_api_tests_run.step);
 
     const c_test_mod = b.createModule(.{
         .target = target,
