@@ -128,11 +128,7 @@ pub fn run(self: *App, widget: vxfw.Widget, opts: Options) anyerror!void {
         try self.dispatchEvents(&loop, &ctx, &mouse_handler, &focus_handler);
 
         // If we have a focus change, handle that event before we layout
-        if (self.wants_focus) |wants_focus| {
-            try focus_handler.focusWidget(&ctx, wants_focus);
-            try self.handleCommand(&ctx.cmds);
-            self.wants_focus = null;
-        }
+        try self.updateFocus(&ctx, &focus_handler);
 
         // Check if we should quit
         if (ctx.quit) return;
@@ -152,11 +148,7 @@ pub fn run(self: *App, widget: vxfw.Widget, opts: Options) anyerror!void {
             // Check if any hover or mouse effects changed
             try mouse_handler.updateMouse(self, surface, &ctx);
             // Our focus may have changed. Handle that here
-            if (self.wants_focus) |wants_focus| {
-                try focus_handler.focusWidget(&ctx, wants_focus);
-                try self.handleCommand(&ctx.cmds);
-                self.wants_focus = null;
-            }
+            try self.updateFocus(&ctx, &focus_handler);
 
             assert(ctx.cmds.items.len == 0);
             if (!ctx.redraw) break :blk surface;
@@ -169,6 +161,14 @@ pub fn run(self: *App, widget: vxfw.Widget, opts: Options) anyerror!void {
         // Update the focus handler list
         try focus_handler.update(self.allocator, surface);
         try self.render(surface, focus_handler.focused_widget);
+    }
+}
+
+fn updateFocus(self: *App, ctx: *vxfw.EventContext, handler: *FocusHandler) anyerror!void {
+    while (self.wants_focus) |widget| {
+        self.wants_focus = null;
+        try handler.focusWidget(ctx, widget);
+        try self.handleCommand(&ctx.cmds);
     }
 }
 

@@ -231,6 +231,22 @@ pub fn build(b: *std.Build) void {
     eof_test_run.addArtifactArg(eof_test);
     b.step("test-app-eof", "Check terminal EOF quits while callback EOF propagates").dependOn(&eof_test_run.step);
 
+    const focus_test = b.addExecutable(.{
+        .name = "app-focus-test",
+        .use_llvm = use_llvm,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/testing/app_focus.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "vaxis", .module = vaxis_mod }},
+        }),
+    });
+    const focus_test_run = b.addSystemCommand(&.{"python3"});
+    focus_test_run.addFileArg(b.path("src/testing/app_focus.py"));
+    focus_test_run.addArtifactArg(focus_test);
+    b.step("test-app-focus", "Check focus callbacks can delegate focus to an input").dependOn(&focus_test_run.step);
+
     const tests = b.addTest(.{
         .use_llvm = use_llvm,
         .root_module = b.createModule(.{
