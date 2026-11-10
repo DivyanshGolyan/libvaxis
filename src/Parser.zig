@@ -306,6 +306,10 @@ inline fn parseGround(input: []const u8) !Result {
                 n = broken;
                 break :blk .{ .codepoint = 0xFFFD, .text = input[0..n] };
             }
+            // A valid start of a character the input ends inside: the rest
+            // is still arriving, so wait for it rather than emit a part.
+            if (b >= 0x80 and input.len < std.unicode.utf8ByteSequenceLength(b) catch unreachable)
+                return .{ .event = null, .n = 0 };
             var iter = uucode.utf8.Iterator.init(input);
             // return null if we don't have a valid codepoint
             const first_cp = iter.next() orelse return error.InvalidUTF8;
@@ -2303,4 +2307,20 @@ test "parse: a malformed character covers only its maximal subpart" {
     const alt = try parser.parse("\x1b\xc3\r", alloc);
     try testing.expectEqual(2, alt.n);
     try testing.expect(alt.invalid);
+}
+
+test "parse: a character split across reads waits for the rest" {
+    const alloc = testing.allocator_instance.allocator();
+    var parser: Parser = .{};
+    // A valid prefix at the end of the input is a character still arriving,
+    // never a key: emitting it would cut the character in two.
+    for ([_][]const u8{ "\xe4", "\xe4\xb8", "\xf0\x9f", "\xf0\x9f\x98" }) |prefix| {
+        const waiting = try parser.parse(prefix, alloc);
+        try testing.expectEqual(0, waiting.n);
+        try testing.expectEqual(@as(?Event, null), waiting.event);
+    }
+    const whole = try parser.parse("\xe4\xb8\xadZ", alloc);
+    try testing.expectEqual(3, whole.n);
+    try testing.expectEqual(0x4E2D, whole.event.?.key_press.codepoint);
+    try testing.expectEqualStrings("\xe4\xb8\xad", whole.event.?.key_press.text.?);
 }
