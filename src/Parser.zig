@@ -204,6 +204,22 @@ pub fn parse(self: *Parser, input: []const u8, paste_allocator: ?std.mem.Allocat
             0x5D => return parseOsc(input, paste_allocator),
             0x5E => return skipUntilST(input), // PM
             0x5F => return parseApc(input),
+            0x1B => if (input.len > 2 and (input[2] == '[' or input[2] == 'O')) {
+                // ESC before a CSI or SS3 sequence is its alt prefix (rxvt
+                // sends Alt-Left as ESC ESC [ D). A sequence that is not a
+                // key keeps its meaning.
+                var inner = try self.parse(input[1..], paste_allocator);
+                if (inner.n == 0) return inner;
+                inner.n += 1;
+                if (inner.event) |*event| switch (event.*) {
+                    .key_press, .key_release => |*key| key.mods.alt = true,
+                    else => {},
+                };
+                return inner;
+            } else return .{
+                .event = .{ .key_press = .{ .codepoint = Key.escape, .mods = .{ .alt = true } } },
+                .n = 2,
+            },
             0x80...0xFF => {
                 // Alt with a multi-byte character: the whole character, once
                 // it has all arrived.
@@ -1144,6 +1160,26 @@ test "parse: alt with a multi-byte character" {
     const invalid = try parser.parse("\x1b\xa9", alloc);
     try testing.expectEqual(2, invalid.n);
     try testing.expect(invalid.invalid);
+}
+
+test "parse: escape before a sequence is its alt prefix" {
+    const alloc = testing.allocator_instance.allocator();
+    var parser: Parser = .{};
+    // rxvt sends Alt-Left as ESC, then the Left sequence.
+    const left = try parser.parse("\x1b\x1b[Db", alloc);
+    try testing.expectEqual(4, left.n);
+    try testing.expectEqual(@as(?Event, .{ .key_press = .{ .codepoint = Key.left, .mods = .{ .alt = true } } }), left.event);
+    const ss3 = try parser.parse("\x1b\x1bOA", alloc);
+    try testing.expectEqual(4, ss3.n);
+    try testing.expectEqual(@as(?Event, .{ .key_press = .{ .codepoint = Key.up, .mods = .{ .alt = true } } }), ss3.event);
+    // A sequence that is not a key keeps its meaning.
+    const paste = try parser.parse("\x1b\x1b[200~b", alloc);
+    try testing.expectEqual(7, paste.n);
+    try testing.expectEqual(@as(?Event, .paste_start), paste.event);
+    // The rest of the sequence has not arrived yet: wait for it.
+    const partial = try parser.parse("\x1b\x1b[", alloc);
+    try testing.expectEqual(0, partial.n);
+    try testing.expectEqual(@as(?Event, null), partial.event);
 }
 
 test "parse: xterm key up" {
