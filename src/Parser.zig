@@ -225,6 +225,7 @@ pub fn parse(self: *Parser, input: []const u8, paste_allocator: ?std.mem.Allocat
                 // it has all arrived.
                 const len = std.unicode.utf8ByteSequenceLength(input[1]) catch
                     return .{ .event = .invalid_key, .n = 2, .invalid = true };
+                if (malformedLength(input[1..])) |broken| return .{ .event = .invalid_key, .n = 1 + broken, .invalid = true };
                 if (input.len < 1 + len) return .{ .event = null, .n = 0 };
                 const codepoint = std.unicode.utf8Decode(input[1 .. 1 + len]) catch
                     return .{ .event = .invalid_key, .n = 1 + len, .invalid = true };
@@ -246,6 +247,31 @@ pub fn parse(self: *Parser, input: []const u8, paste_allocator: ?std.mem.Allocat
             },
         }
     } else return parseGround(input);
+}
+
+/// The length of the malformed character that starts `input`, or null when
+/// it starts a valid character or the valid start of one still arriving.
+/// The length is Unicode's maximal subpart: the lead byte and the bytes after
+/// it that could still continue it, so the byte that broke the character,
+/// such as Enter, is read on its own.
+fn malformedLength(input: []const u8) ?usize {
+    const lead = input[0];
+    if (lead < 0x80) return null;
+    const len = std.unicode.utf8ByteSequenceLength(lead) catch return 1;
+    if (lead == 0xC0 or lead == 0xC1) return 1; // Overlong two-byte forms.
+    for (1..@min(len, input.len)) |i| {
+        // The second byte's range depends on the lead: no overlongs,
+        // surrogates or scalars past U+10FFFF.
+        const low: u8, const high: u8 = if (i > 1) .{ 0x80, 0xBF } else switch (lead) {
+            0xE0 => .{ 0xA0, 0xBF },
+            0xED => .{ 0x80, 0x9F },
+            0xF0 => .{ 0x90, 0xBF },
+            0xF4 => .{ 0x80, 0x8F },
+            else => .{ 0x80, 0xBF },
+        };
+        if (input[i] < low or input[i] > high) return i;
+    }
+    return null;
 }
 
 /// Parse ground state
@@ -276,6 +302,10 @@ inline fn parseGround(input: []const u8) !Result {
         },
         0x7F => .{ .codepoint = Key.backspace },
         else => blk: {
+            if (malformedLength(input)) |broken| {
+                n = broken;
+                break :blk .{ .codepoint = 0xFFFD, .text = input[0..n] };
+            }
             var iter = uucode.utf8.Iterator.init(input);
             // return null if we don't have a valid codepoint
             const first_cp = iter.next() orelse return error.InvalidUTF8;
@@ -2250,4 +2280,27 @@ test "strict keyboard: associated text fits completely or rejects the event" {
             if (length == 128) try testing.expectEqual(length, result.event.?.key_press.text.?.len) else try testing.expectEqual(@as(?Event, .invalid_key), result.event);
         }
     }
+}
+
+test "parse: a malformed character covers only its maximal subpart" {
+    const alloc = testing.allocator_instance.allocator();
+    var parser: Parser = .{};
+    // A lead byte whose character the next byte breaks is one replacement
+    // key; the byte that broke it, here Enter, is read on its own.
+    const broken = try parser.parse("\xc3\r", alloc);
+    try testing.expectEqual(1, broken.n);
+    try testing.expectEqual(0xFFFD, broken.event.?.key_press.codepoint);
+    try testing.expectEqualStrings("\xc3", broken.event.?.key_press.text.?);
+    const enter = try parser.parse("\r", alloc);
+    try testing.expectEqual(@as(?Event, .{ .key_press = .{ .codepoint = Key.enter } }), enter.event);
+    // The valid prefix of a three-byte character stays in the replacement.
+    const prefix = try parser.parse("\xe2\x82(", alloc);
+    try testing.expectEqual(2, prefix.n);
+    // A second byte outside its lead's range ends the subpart at the lead.
+    const surrogate = try parser.parse("\xed\xa0\x80", alloc);
+    try testing.expectEqual(1, surrogate.n);
+    // Alt with a broken character keeps the byte after it as well.
+    const alt = try parser.parse("\x1b\xc3\r", alloc);
+    try testing.expectEqual(2, alt.n);
+    try testing.expect(alt.invalid);
 }
