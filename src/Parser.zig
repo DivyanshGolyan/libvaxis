@@ -652,6 +652,7 @@ inline fn parseCsi(input: []const u8, text_buf: []u8, cursor_position_requests: 
             if (privateMarker(number_buf)) return null_event;
             for (number_buf) |b| if (!std.ascii.isDigit(b)) return invalid_key;
             const number = parseDecimal(u16, number_buf) orelse return null_event;
+            if (number == 27) return parseModifiedKey(&field_iter, sequence.len);
             // A modifier field exists only on a supported key; malformed ones
             // fail closed below instead of ignoring the key the user pressed.
 
@@ -861,6 +862,29 @@ inline fn parseCsi(input: []const u8, text_buf: []u8, cursor_position_requests: 
         },
         else => return null_event,
     }
+}
+
+/// xterm modifyOtherKeys, CSI 27 ; modifier ; code ~, which some terminals
+/// (Ghostty's legacy Enter table) send without being asked. The modifier is
+/// 1 + (Shift 1 | Alt 2 | Ctrl 4 | Super 8), the low bits of Kitty's mask, and
+/// the code is the key's codepoint. It is a press with no associated text.
+fn parseModifiedKey(fields: *std.mem.SplitIterator(u8, .scalar), n: usize) Result {
+    // CSI 27 ~ alone is no key this parser knows: ignore it, as other
+    // unknown keys. With fields, a malformed value is an invalid key.
+    const modifier_buf = fields.next() orelse return .{ .event = null, .n = n };
+    const invalid_key: Result = .{ .event = .invalid_key, .n = n };
+    const code_buf = fields.next() orelse return invalid_key;
+    if (fields.next() != null) return invalid_key;
+    const modifier = parseDecimal(u8, modifier_buf) orelse return invalid_key;
+    if (modifier < 1 or modifier > 16) return invalid_key;
+    const code = parseScalar(code_buf) orelse return invalid_key;
+    return .{
+        .event = .{ .key_press = .{
+            .codepoint = code,
+            .mods = @bitCast(modifier - 1),
+        } },
+        .n = n,
+    };
 }
 
 /// CSI parameters that begin with a private marker are some other report
@@ -2092,6 +2116,28 @@ test "parse: malformed key fields are an invalid key, never the key" {
         try testing.expectEqual(bytes.len, result.n);
         const following = try parser.parse("z", null);
         try testing.expectEqualStrings("z", following.event.?.key_press.text.?);
+    }
+}
+
+test "parse: xterm modifyOtherKeys" {
+    var parser: Parser = .{};
+    // Shift-Enter and Ctrl-Alt-c, as Ghostty and xterm send them.
+    const shift_enter = try parser.parse("\x1b[27;2;13~", null);
+    try testing.expectEqual(10, shift_enter.n);
+    try testing.expectEqual(@as(?Event, .{ .key_press = .{ .codepoint = Key.enter, .mods = .{ .shift = true } } }), shift_enter.event);
+    const ctrl_alt_c = try parser.parse("\x1b[27;7;99~", null);
+    try testing.expectEqual(@as(?Event, .{ .key_press = .{ .codepoint = 'c', .mods = .{ .alt = true, .ctrl = true } } }), ctrl_alt_c.event);
+    // CSI 27 ~ alone is unknown; with fields, a malformed one is invalid.
+    const bare = try parser.parse("\x1b[27~", null);
+    try testing.expectEqual(@as(?Event, null), bare.event);
+    try testing.expectEqual(5, bare.n);
+    for ([_][]const u8{
+        "\x1b[27;0;13~",    "\x1b[27;17;13~",     "\x1b[27;1~",
+        "\x1b[27;1;55296~", "\x1b[27;1;1114112~", "\x1b[27;1;13;1~",
+    }) |bytes| {
+        const result = try parser.parse(bytes, null);
+        try testing.expectEqual(@as(?Event, .invalid_key), result.event);
+        try testing.expectEqual(bytes.len, result.n);
     }
 }
 
