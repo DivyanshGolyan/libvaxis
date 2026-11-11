@@ -200,6 +200,19 @@ pub fn parse(self: *Parser, input: []const u8, paste_allocator: ?std.mem.Allocat
             0x5D => return parseOsc(input, paste_allocator),
             0x5E => return skipUntilST(input), // PM
             0x5F => return parseApc(input),
+            // Alt with a multi-byte character is the whole character, once
+            // it has all arrived, not its lead byte.
+            0x80...0xFF => switch (utf8Start(input[1..])) {
+                .whole => |len| return .{
+                    .event = .{ .key_press = .{
+                        .codepoint = std.unicode.utf8Decode(input[1..][0..len]) catch unreachable,
+                        .mods = .{ .alt = true },
+                    } },
+                    .n = 1 + len,
+                },
+                .partial => return .{ .event = null, .n = 0 },
+                .malformed => |len| return .{ .event = .invalid_key, .n = 1 + len },
+            },
             else => {
                 // Anything else is an "alt + <char>" keypress
                 const key: Key = .{
@@ -1150,6 +1163,28 @@ test "parse: xterm alt+a" {
 
     try testing.expectEqual(2, result.n);
     try testing.expectEqual(expected_event, result.event);
+}
+
+test "parse: alt with a multi-byte character" {
+    const alloc = testing.allocator_instance.allocator();
+    var parser: Parser = .{};
+    // Option as Meta: ESC, then the whole character, not its lead byte.
+    const result = try parser.parse("\x1b\xc3\xa9", alloc);
+    const expected_key: Key = .{ .codepoint = 0xe9, .mods = .{ .alt = true } };
+    try testing.expectEqual(3, result.n);
+    try testing.expectEqual(@as(?Event, .{ .key_press = expected_key }), result.event);
+    // The rest of the character has not arrived yet: wait for it.
+    const partial = try parser.parse("\x1b\xc3", alloc);
+    try testing.expectEqual(0, partial.n);
+    try testing.expectEqual(@as(?Event, null), partial.event);
+    // A byte that cannot start a character is an invalid key.
+    const invalid = try parser.parse("\x1b\xa9", alloc);
+    try testing.expectEqual(2, invalid.n);
+    try testing.expectEqual(@as(?Event, .invalid_key), invalid.event);
+    // So is a broken character; the byte that broke it is read on its own.
+    const broken = try parser.parse("\x1b\xc3\r", alloc);
+    try testing.expectEqual(2, broken.n);
+    try testing.expectEqual(@as(?Event, .invalid_key), broken.event);
 }
 
 test "parse: xterm key up" {
