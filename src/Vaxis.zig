@@ -484,10 +484,8 @@ pub fn setTerminalVersion(self: *Vaxis, identity: []const u8) void {
 }
 
 /// Draws the screen to the terminal.
-/// On error, output may be partial and cached terminal state may be inaccurate.
-/// Stop rendering with this instance; another render or queueRefresh is not a
-/// recovery operation. Continuing requires a usable output channel and an
-/// explicitly re-established terminal state and render origin.
+/// On error the output may be partial and the cached terminal state wrong.
+/// Rendering again, with or without queueRefresh, does not recover it.
 pub fn render(self: *Vaxis, tty: *std.Io.Writer) !void {
     defer self.refresh = false;
     assert(self.screen.buf.len == @as(usize, @intCast(self.screen.width)) * self.screen.height); // correct size

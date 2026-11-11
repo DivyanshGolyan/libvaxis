@@ -400,7 +400,7 @@ pub fn print(self: Window, segments: []const Segment, opts: PrintOptions) PrintR
                                     var width = self.gwidth(word);
                                     if (word.ptr + word.len == segment.text.ptr + segment.text.len) {
                                         for (segments[segment_index + 1 ..]) |next| {
-                                            const end = std.mem.indexOfAny(u8, next.text, " \t\r\n") orelse next.text.len;
+                                            const end = wordLen(next.text);
                                             width +|= self.gwidth(next.text[0..end]);
                                             if (end != next.text.len) break;
                                         }
@@ -916,17 +916,18 @@ const WhitespaceTokenizer = struct {
             },
             .word => {
                 const start = self.index;
-                while (self.index < self.buf.len) : (self.index += 1) {
-                    switch (self.buf[self.index]) {
-                        ' ', '\t' => break,
-                        else => {},
-                    }
-                }
+                self.index += wordLen(self.buf[start..]);
                 return .{ .word = self.buf[start..self.index] };
             },
         }
     }
 };
+
+/// The length of the word that starts `text`: the bytes before its first
+/// space, tab or line break.
+fn wordLen(text: []const u8) usize {
+    return std.mem.indexOfAny(u8, text, " \t\r\n") orelse text.len;
+}
 
 test "print: wide graphemes move intact to the next row" {
     var screen = try Screen.init(std.testing.allocator, .{ .cols = 4, .rows = 3, .x_pixel = 0, .y_pixel = 0 });

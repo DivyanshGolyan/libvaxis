@@ -198,55 +198,6 @@ pub fn build(b: *std.Build) void {
     // Tests
     const tests_step = b.step("test", "Run tests");
 
-    // This is a native executable, not a Zig test: App must use the real Tty.
-    const init_test = b.addExecutable(.{
-        .name = "app-init-test",
-        .use_llvm = use_llvm,
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/testing/app_init.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{.{ .name = "vaxis", .module = vaxis_mod }},
-        }),
-    });
-    const init_test_run = b.addSystemCommand(&.{"python3"});
-    init_test_run.addFileArg(b.path("src/testing/app_init.py"));
-    init_test_run.addArtifactArg(init_test);
-    b.step("test-app-init", "Check native POSIX terminal restoration after an init failure").dependOn(&init_test_run.step);
-
-    const eof_test = b.addExecutable(.{
-        .name = "app-eof-test",
-        .use_llvm = use_llvm,
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/testing/app_eof.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{.{ .name = "vaxis", .module = vaxis_mod }},
-        }),
-    });
-    const eof_test_run = b.addSystemCommand(&.{"python3"});
-    eof_test_run.addFileArg(b.path("src/testing/app_eof.py"));
-    eof_test_run.addArtifactArg(eof_test);
-    b.step("test-app-eof", "Check terminal EOF quits while callback EOF propagates").dependOn(&eof_test_run.step);
-
-    const focus_test = b.addExecutable(.{
-        .name = "app-focus-test",
-        .use_llvm = use_llvm,
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/testing/app_focus.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{.{ .name = "vaxis", .module = vaxis_mod }},
-        }),
-    });
-    const focus_test_run = b.addSystemCommand(&.{"python3"});
-    focus_test_run.addFileArg(b.path("src/testing/app_focus.py"));
-    focus_test_run.addArtifactArg(focus_test);
-    b.step("test-app-focus", "Check focus callbacks can delegate focus to an input").dependOn(&focus_test_run.step);
-
     const tests = b.addTest(.{
         .use_llvm = use_llvm,
         .root_module = b.createModule(.{
@@ -278,9 +229,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    const module_tests_run = b.addRunArtifact(module_tests);
-    tests_step.dependOn(&module_tests_run.step);
-    b.step("test-modules", "Check shared Unicode and width module identity").dependOn(&module_tests_run.step);
+    tests_step.dependOn(&b.addRunArtifact(module_tests).step);
 
     // Let's make sure that all of the examples compile and can run any tests
     // that they may have defined.
@@ -309,7 +258,6 @@ pub fn build(b: *std.Build) void {
     });
     const c_api_tests = b.addTest(.{
         .use_llvm = use_llvm,
-        .filters = if (b.option([]const u8, "c-api-test-filter", "Run C API tests matching this substring")) |filter| &.{filter} else &.{},
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/c_api.zig"),
             .target = target,
@@ -322,9 +270,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    const c_api_tests_run = b.addRunArtifact(c_api_tests);
-    tests_step.dependOn(&c_api_tests_run.step);
-    b.step("test-c-api", "Run C API unit tests").dependOn(&c_api_tests_run.step);
+    tests_step.dependOn(&b.addRunArtifact(c_api_tests).step);
 
     const c_test_mod = b.createModule(.{
         .target = target,

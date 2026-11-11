@@ -1699,7 +1699,7 @@ test "c api: plain keypress with text" {
     try testing.expect(!event_key_matches(event, 'b', 0));
 }
 
-test "c api: invalid authorization key is not Enter" {
+test "c api: an invalid key is not Enter" {
     const parser = parser_new() orelse return error.OutOfMemory;
     defer parser_free(parser);
     var event: ?*const CEvent = null;

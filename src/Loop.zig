@@ -712,7 +712,7 @@ test "paste dispatch preserves boundaries and transfers or frees clipboard text"
     try testing.expectEqual(@as(?KeyEvent, null), try keys.tryEvent());
 }
 
-test "strict keyboard: invalid input reaches the App queue before the following key" {
+test "an invalid key reaches the queue before the key that follows it" {
     const testing = std.testing;
     const AppEvent = vaxis.vxfw.Event;
     var env = try testing.environ.createMap(testing.allocator);

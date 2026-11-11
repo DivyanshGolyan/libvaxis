@@ -16,10 +16,6 @@ const Parser = @This();
 pub const Result = struct {
     event: ?Event,
     n: usize,
-    /// A complete keyboard sequence of a supported form whose values are
-    /// malformed: modifiers, event type, key scalar or associated text. `n`
-    /// covers the sequence. It is not an unknown sequence to ignore.
-    invalid: bool = false,
 };
 
 /// Shared cursor query state. The count and idle deadline are updated together
@@ -197,13 +193,6 @@ pub fn parse(self: *Parser, input: []const u8, paste_allocator: ?std.mem.Allocat
     // We gate this for len > 1 so we can detect singular escape key presses
     if (input[0] == 0x1b and input.len > 1) {
         switch (input[1]) {
-            0x4F => return parseSs3(input),
-            0x50 => return parseDcs(input), // DCS
-            0x58 => return skipUntilST(input), // SOS
-            0x5B => return parseCsi(input, &self.buf, self.cursor_position_requests), // CSI
-            0x5D => return parseOsc(input, paste_allocator),
-            0x5E => return skipUntilST(input), // PM
-            0x5F => return parseApc(input),
             0x1B => if (input.len > 2 and (input[2] == '[' or input[2] == 'O')) {
                 // ESC before a CSI or SS3 sequence is its alt prefix (rxvt
                 // sends Alt-Left as ESC ESC [ D). A sequence that is not a
@@ -220,19 +209,25 @@ pub fn parse(self: *Parser, input: []const u8, paste_allocator: ?std.mem.Allocat
                 .event = .{ .key_press = .{ .codepoint = Key.escape, .mods = .{ .alt = true } } },
                 .n = 2,
             },
-            0x80...0xFF => {
-                // Alt with a multi-byte character: the whole character, once
-                // it has all arrived.
-                const len = std.unicode.utf8ByteSequenceLength(input[1]) catch
-                    return .{ .event = .invalid_key, .n = 2, .invalid = true };
-                if (malformedLength(input[1..])) |broken| return .{ .event = .invalid_key, .n = 1 + broken, .invalid = true };
-                if (input.len < 1 + len) return .{ .event = null, .n = 0 };
-                const codepoint = std.unicode.utf8Decode(input[1 .. 1 + len]) catch
-                    return .{ .event = .invalid_key, .n = 1 + len, .invalid = true };
-                return .{
-                    .event = .{ .key_press = .{ .codepoint = codepoint, .mods = .{ .alt = true } } },
+            0x4F => return parseSs3(input),
+            0x50 => return parseDcs(input), // DCS
+            0x58 => return skipUntilST(input), // SOS
+            0x5B => return parseCsi(input, &self.buf, self.cursor_position_requests), // CSI
+            0x5D => return parseOsc(input, paste_allocator),
+            0x5E => return skipUntilST(input), // PM
+            0x5F => return parseApc(input),
+            // Alt with a multi-byte character is the whole character, once
+            // it has all arrived, not its lead byte.
+            0x80...0xFF => switch (utf8Start(input[1..])) {
+                .whole => |len| return .{
+                    .event = .{ .key_press = .{
+                        .codepoint = std.unicode.utf8Decode(input[1..][0..len]) catch unreachable,
+                        .mods = .{ .alt = true },
+                    } },
                     .n = 1 + len,
-                };
+                },
+                .partial => return .{ .event = null, .n = 0 },
+                .malformed => |len| return .{ .event = .invalid_key, .n = 1 + len },
             },
             else => {
                 // Anything else is an "alt + <char>" keypress
@@ -249,18 +244,33 @@ pub fn parse(self: *Parser, input: []const u8, paste_allocator: ?std.mem.Allocat
     } else return parseGround(input);
 }
 
-/// The length of the malformed character that starts `input`, or null when
-/// it starts a valid character or the valid start of one still arriving.
-/// The length is Unicode's maximal subpart: the lead byte and the bytes after
-/// it that could still continue it, so the byte that broke the character,
-/// such as Enter, is read on its own.
-fn malformedLength(input: []const u8) ?usize {
+/// How the UTF-8 character at the start of the input reads.
+const Utf8Start = union(enum) {
+    /// A whole character of this many bytes.
+    whole: usize,
+    /// The valid start of a character the input ends inside: the rest is
+    /// still arriving.
+    partial,
+    /// A malformed character of this many bytes, Unicode's maximal subpart:
+    /// the lead byte and the bytes after it that could still continue it. The
+    /// byte that broke the character, such as Enter, is not part of it.
+    malformed: usize,
+};
+
+fn utf8Start(input: []const u8) Utf8Start {
     const lead = input[0];
-    if (lead < 0x80) return null;
-    const len = std.unicode.utf8ByteSequenceLength(lead) catch return 1;
-    if (lead == 0xC0 or lead == 0xC1) return 1; // Overlong two-byte forms.
-    for (1..@min(len, input.len)) |i| {
-        // The second byte's range depends on the lead: no overlongs,
+    const len: usize = switch (lead) {
+        0x00...0x7F => return .{ .whole = 1 },
+        0xC2...0xDF => 2,
+        0xE0...0xEF => 3,
+        0xF0...0xF4 => 4,
+        // A continuation byte, an overlong two-byte lead (C0, C1), or a lead
+        // past U+10FFFF.
+        else => return .{ .malformed = 1 },
+    };
+    for (1..len) |i| {
+        if (i == input.len) return .partial;
+        // The second byte's range depends on the lead: no overlong forms,
         // surrogates or scalars past U+10FFFF.
         const low: u8, const high: u8 = if (i > 1) .{ 0x80, 0xBF } else switch (lead) {
             0xE0 => .{ 0xA0, 0xBF },
@@ -269,9 +279,9 @@ fn malformedLength(input: []const u8) ?usize {
             0xF4 => .{ 0x80, 0x8F },
             else => .{ 0x80, 0xBF },
         };
-        if (input[i] < low or input[i] > high) return i;
+        if (input[i] < low or input[i] > high) return .{ .malformed = i };
     }
-    return null;
+    return .{ .whole = len };
 }
 
 /// Parse ground state
@@ -302,14 +312,15 @@ inline fn parseGround(input: []const u8) !Result {
         },
         0x7F => .{ .codepoint = Key.backspace },
         else => blk: {
-            if (malformedLength(input)) |broken| {
-                n = broken;
-                break :blk .{ .codepoint = 0xFFFD, .text = input[0..n] };
+            switch (utf8Start(input)) {
+                .whole => {},
+                // Wait for the rest rather than emit a part of a character.
+                .partial => return .{ .event = null, .n = 0 },
+                .malformed => |len| {
+                    n = len;
+                    break :blk .{ .codepoint = 0xFFFD, .text = input[0..n] };
+                },
             }
-            // A valid start of a character the input ends inside: the rest
-            // is still arriving, so wait for it rather than emit a part.
-            if (b >= 0x80 and input.len < std.unicode.utf8ByteSequenceLength(b) catch unreachable)
-                return .{ .event = null, .n = 0 };
             var iter = uucode.utf8.Iterator.init(input);
             // return null if we don't have a valid codepoint
             const first_cp = iter.next() orelse return error.InvalidUTF8;
@@ -629,7 +640,7 @@ inline fn parseCsi(input: []const u8, text_buf: []u8, cursor_position_requests: 
         }
     } else return .{ .event = null, .n = 0 };
     const null_event: Result = .{ .event = null, .n = sequence.len };
-    const invalid_key: Result = .{ .event = .invalid_key, .n = sequence.len, .invalid = true };
+    const invalid_key: Result = .{ .event = .invalid_key, .n = sequence.len };
 
     const final = sequence[sequence.len - 1];
     if (final == 'R') report: {
@@ -671,7 +682,6 @@ inline fn parseCsi(input: []const u8, text_buf: []u8, cursor_position_requests: 
             if (privateMarker(number_buf)) return null_event;
             if (number_buf.len != 0 and !std.mem.eql(u8, number_buf, "1")) return if (final == 'R') null_event else invalid_key;
 
-            var is_release: bool = false;
             var key: Key = .{
                 .codepoint = switch (final) {
                     'A' => Key.up,
@@ -689,13 +699,7 @@ inline fn parseCsi(input: []const u8, text_buf: []u8, cursor_position_requests: 
                 },
             };
 
-            if (field_iter.next()) |field| {
-                const modifiers = parseKeyModifiers(field) orelse return invalid_key;
-                key.mods = modifiers.mods;
-                is_release = modifiers.release;
-            }
-            if (field_iter.next()) |field| key.text = parseKeyText(field, text_buf) orelse return invalid_key;
-            if (field_iter.next() != null) return invalid_key;
+            const is_release = parseKeyFields(&field_iter, &key, text_buf) orelse return invalid_key;
 
             const event: Event = if (is_release) .{ .key_release = key } else .{ .key_press = key };
             return .{
@@ -757,14 +761,7 @@ inline fn parseCsi(input: []const u8, text_buf: []u8, cursor_position_requests: 
                 },
             };
 
-            var is_release: bool = false;
-            if (field_iter.next()) |field| {
-                const modifiers = parseKeyModifiers(field) orelse return invalid_key;
-                key.mods = modifiers.mods;
-                is_release = modifiers.release;
-            }
-            if (field_iter.next()) |field| key.text = parseKeyText(field, text_buf) orelse return invalid_key;
-            if (field_iter.next() != null) return invalid_key;
+            const is_release = parseKeyFields(&field_iter, &key, text_buf) orelse return invalid_key;
 
             const event: Event = if (is_release) .{ .key_release = key } else .{ .key_press = key };
             return .{
@@ -875,15 +872,7 @@ inline fn parseCsi(input: []const u8, text_buf: []u8, cursor_position_requests: 
                 if (param_iter.next() != null) return invalid_key;
             }
 
-            var is_release: bool = false;
-
-            if (field_iter.next()) |field| {
-                const modifiers = parseKeyModifiers(field) orelse return invalid_key;
-                key.mods = modifiers.mods;
-                is_release = modifiers.release;
-            }
-            if (field_iter.next()) |field| key.text = parseKeyText(field, text_buf) orelse return invalid_key;
-            if (field_iter.next() != null) return invalid_key;
+            const is_release = parseKeyFields(&field_iter, &key, text_buf) orelse return invalid_key;
 
             {
                 // We check if we have *only* shift, no text, and a printable character. This can
@@ -956,13 +945,12 @@ inline fn parseCsi(input: []const u8, text_buf: []u8, cursor_position_requests: 
 /// xterm modifyOtherKeys, CSI 27 ; modifier ; code ~, which some terminals
 /// (Ghostty's legacy Enter table) send without being asked. The modifier is
 /// 1 + (Shift 1 | Alt 2 | Ctrl 4 | Super 8), the low bits of Kitty's mask, and
-/// the code is the key's codepoint, unchecked as in the Kitty form. It is a
-/// press with no associated text.
+/// the code is the key's codepoint. It is a press with no associated text.
 fn parseModifiedKey(fields: *std.mem.SplitIterator(u8, .scalar), n: usize) Result {
     // CSI 27 ~ alone is no key this parser knows: ignore it, as other
-    // unknown keys. With fields, every malformed value fails closed.
+    // unknown keys. With fields, a malformed value is an invalid key.
     const modifier_buf = fields.next() orelse return .{ .event = null, .n = n };
-    const invalid_key: Result = .{ .event = .invalid_key, .n = n, .invalid = true };
+    const invalid_key: Result = .{ .event = .invalid_key, .n = n };
     const code_buf = fields.next() orelse return invalid_key;
     if (fields.next() != null) return invalid_key;
     const modifier = parseDecimal(u8, modifier_buf) orelse return invalid_key;
@@ -981,6 +969,21 @@ fn parseModifiedKey(fields: *std.mem.SplitIterator(u8, .scalar), n: usize) Resul
 /// (or a request a terminal never sends), never a key.
 fn privateMarker(params: []const u8) bool {
     return params.len != 0 and std.mem.indexOfScalar(u8, "<=>?", params[0]) != null;
+}
+
+/// Reads the fields that follow a key's number, modifiers[:event-type] and
+/// associated text, into `key`. Returns whether the event is a release, or
+/// null when a field is malformed or one too many.
+fn parseKeyFields(fields: *std.mem.SplitIterator(u8, .scalar), key: *Key, text_buf: []u8) ?bool {
+    var release = false;
+    if (fields.next()) |field| {
+        const modifiers = parseKeyModifiers(field) orelse return null;
+        key.mods = modifiers.mods;
+        release = modifiers.release;
+    }
+    if (fields.next()) |field| key.text = parseKeyText(field, text_buf) orelse return null;
+    if (fields.next() != null) return null;
+    return release;
 }
 
 /// Kitty's modifiers[:event-type] field. The modifier is 1 plus an eight-bit
@@ -1195,41 +1198,11 @@ test "parse: alt with a multi-byte character" {
     // A byte that cannot start a character is an invalid key.
     const invalid = try parser.parse("\x1b\xa9", alloc);
     try testing.expectEqual(2, invalid.n);
-    try testing.expect(invalid.invalid);
-}
-
-test "parse: escape before a sequence is its alt prefix" {
-    const alloc = testing.allocator_instance.allocator();
-    var parser: Parser = .{};
-    // rxvt sends Alt-Left as ESC, then the Left sequence.
-    const left = try parser.parse("\x1b\x1b[Db", alloc);
-    try testing.expectEqual(4, left.n);
-    try testing.expectEqual(@as(?Event, .{ .key_press = .{ .codepoint = Key.left, .mods = .{ .alt = true } } }), left.event);
-    const ss3 = try parser.parse("\x1b\x1bOA", alloc);
-    try testing.expectEqual(4, ss3.n);
-    try testing.expectEqual(@as(?Event, .{ .key_press = .{ .codepoint = Key.up, .mods = .{ .alt = true } } }), ss3.event);
-    // A sequence that is not a key keeps its meaning.
-    const paste = try parser.parse("\x1b\x1b[200~b", alloc);
-    try testing.expectEqual(7, paste.n);
-    try testing.expectEqual(@as(?Event, .paste_start), paste.event);
-    // The rest of the sequence has not arrived yet: wait for it.
-    const partial = try parser.parse("\x1b\x1b[", alloc);
-    try testing.expectEqual(0, partial.n);
-    try testing.expectEqual(@as(?Event, null), partial.event);
-}
-
-test "parse: an X10 mouse report waits for its three bytes" {
-    const alloc = testing.allocator_instance.allocator();
-    var parser: Parser = .{};
-    // Its button and position bytes have not all arrived: none is text.
-    for ([_][]const u8{ "\x1b[M", "\x1b[M ", "\x1b[M i" }) |partial| {
-        const result = try parser.parse(partial, alloc);
-        try testing.expectEqual(0, result.n);
-        try testing.expectEqual(@as(?Event, null), result.event);
-    }
-    const whole = try parser.parse("\x1b[M isZ", alloc);
-    try testing.expectEqual(6, whole.n);
-    try testing.expect(whole.event.? == .mouse);
+    try testing.expectEqual(@as(?Event, .invalid_key), invalid.event);
+    // So is a broken character; the byte that broke it is read on its own.
+    const broken = try parser.parse("\x1b\xc3\r", alloc);
+    try testing.expectEqual(2, broken.n);
+    try testing.expectEqual(@as(?Event, .invalid_key), broken.event);
 }
 
 test "parse: xterm key up" {
@@ -1269,6 +1242,30 @@ test "parse: xterm shift+up" {
 
     try testing.expectEqual(6, result.n);
     try testing.expectEqual(expected_event, result.event);
+}
+
+test "parse: escape before a sequence is its alt prefix" {
+    const alloc = testing.allocator_instance.allocator();
+    var parser: Parser = .{};
+    // rxvt sends Alt-Left as ESC, then the Left sequence.
+    const left = try parser.parse("\x1b\x1b[Db", alloc);
+    try testing.expectEqual(4, left.n);
+    try testing.expectEqual(@as(?Event, .{ .key_press = .{ .codepoint = Key.left, .mods = .{ .alt = true } } }), left.event);
+    const ss3 = try parser.parse("\x1b\x1bOA", alloc);
+    try testing.expectEqual(4, ss3.n);
+    try testing.expectEqual(@as(?Event, .{ .key_press = .{ .codepoint = Key.up, .mods = .{ .alt = true } } }), ss3.event);
+    // A sequence that is not a key keeps its meaning.
+    const paste = try parser.parse("\x1b\x1b[200~b", alloc);
+    try testing.expectEqual(7, paste.n);
+    try testing.expectEqual(@as(?Event, .paste_start), paste.event);
+    // The rest of the sequence has not arrived yet: wait for it.
+    const partial = try parser.parse("\x1b\x1b[", alloc);
+    try testing.expectEqual(0, partial.n);
+    try testing.expectEqual(@as(?Event, null), partial.event);
+    // ESC ESC alone is still Alt-Escape.
+    const alt_escape = try parser.parse("\x1b\x1b", alloc);
+    try testing.expectEqual(2, alt_escape.n);
+    try testing.expectEqual(@as(?Event, .{ .key_press = .{ .codepoint = Key.escape, .mods = .{ .alt = true } } }), alt_escape.event);
 }
 
 test "parse: xterm shift+tab" {
@@ -1462,6 +1459,61 @@ test "parse: single codepoint with more in buffer" {
 
     try testing.expectEqual(4, result.n);
     try testing.expectEqualDeep(expected_event, result.event);
+}
+
+test "parse: a malformed character covers only its maximal subpart" {
+    const alloc = testing.allocator_instance.allocator();
+    var parser: Parser = .{};
+    // A lead byte whose character the next byte breaks is one replacement
+    // key; the byte that broke it, here Enter, is read on its own.
+    const broken = try parser.parse("\xc3\r", alloc);
+    try testing.expectEqual(1, broken.n);
+    try testing.expectEqual(0xFFFD, broken.event.?.key_press.codepoint);
+    try testing.expectEqualStrings("\xc3", broken.event.?.key_press.text.?);
+    const enter = try parser.parse("\r", alloc);
+    try testing.expectEqual(@as(?Event, .{ .key_press = .{ .codepoint = Key.enter } }), enter.event);
+    // The valid prefix of a three-byte character stays in the replacement.
+    const prefix = try parser.parse("\xe2\x82(", alloc);
+    try testing.expectEqual(2, prefix.n);
+    // A second byte outside its lead's range ends the subpart at the lead.
+    const surrogate = try parser.parse("\xed\xa0\x80", alloc);
+    try testing.expectEqual(1, surrogate.n);
+}
+
+test "parse: a character split across reads waits for the rest" {
+    const alloc = testing.allocator_instance.allocator();
+    var parser: Parser = .{};
+    // A valid prefix at the end of the input is a character still arriving,
+    // never a key: emitting it would cut the character in two.
+    for ([_][]const u8{ "\xe4", "\xe4\xb8", "\xf0\x9f", "\xf0\x9f\x98" }) |prefix| {
+        const waiting = try parser.parse(prefix, alloc);
+        try testing.expectEqual(0, waiting.n);
+        try testing.expectEqual(@as(?Event, null), waiting.event);
+    }
+    const whole = try parser.parse("\xe4\xb8\xadZ", alloc);
+    try testing.expectEqual(3, whole.n);
+    try testing.expectEqual(0x4E2D, whole.event.?.key_press.codepoint);
+    try testing.expectEqualStrings("\xe4\xb8\xad", whole.event.?.key_press.text.?);
+}
+
+test "utf8Start: whole exactly when the standard library decodes the character" {
+    // Every lead and second byte, with valid continuation bytes after them.
+    for (0..256) |lead| for (0..256) |second| {
+        const bytes = [4]u8{ @intCast(lead), @intCast(second), 0x80, 0x80 };
+        const len = std.unicode.utf8ByteSequenceLength(bytes[0]) catch 1;
+        const valid = std.unicode.utf8ValidateSlice(bytes[0..len]);
+        switch (utf8Start(&bytes)) {
+            .whole => |n| {
+                try testing.expect(valid);
+                try testing.expectEqual(len, n);
+            },
+            .malformed => |n| {
+                try testing.expect(!valid);
+                try testing.expectEqual(1, n);
+            },
+            .partial => return error.TestUnexpectedResult,
+        }
+    };
 }
 
 test "parse: multiple codepoint grapheme" {
@@ -1959,6 +2011,20 @@ test "parse(csi): xterm mouse" {
     try testing.expectEqual(expected.event, result.event);
 }
 
+test "parse: an X10 mouse report waits for its three bytes" {
+    const alloc = testing.allocator_instance.allocator();
+    var parser: Parser = .{};
+    // Its button and position bytes have not all arrived: none is text.
+    for ([_][]const u8{ "\x1b[M", "\x1b[M ", "\x1b[M i" }) |partial| {
+        const result = try parser.parse(partial, alloc);
+        try testing.expectEqual(0, result.n);
+        try testing.expectEqual(@as(?Event, null), result.event);
+    }
+    const whole = try parser.parse("\x1b[M isZ", alloc);
+    try testing.expectEqual(6, whole.n);
+    try testing.expect(whole.event.? == .mouse);
+}
+
 test "parse: disambiguate shift + space" {
     const alloc = testing.allocator_instance.allocator();
     const input = "\x1b[32;2u";
@@ -2228,22 +2294,19 @@ test "parse: unterminated dcs does not swallow the next sequence" {
     try testing.expectEqual(@as(?Event, .cap_kitty_keyboard), next.event);
 }
 
-test "strict keyboard: malformed fields remain invalid rather than ordinary Enter" {
+test "parse: malformed key fields are an invalid key, never the key" {
     const invalid = [_][]const u8{
         "\x1b[13;0u",       "\x1b[13;257u",       "\x1b[13;65536u",
         "\x1b[13;1:0u",     "\x1b[13;1:4u",       "\x1b[13;1:256u",
         "\x1b[55296u",      "\x1b[1114112u",      "\x1b[+13u",
         "\x1b[13:55296u",   "\x1b[13::1114112u",  "\x1b[13:1:2:3u",
         "\x1b[13;1;55296u", "\x1b[13;1;1114112u", "\x1b[13;1;97;98u",
-        "\x1b[27;0;13~",    "\x1b[27;17;13~",     "\x1b[27;1~",
-        "\x1b[27;1;55296~", "\x1b[27;1;1114112~", "\x1b[27;1;13;1~",
         "\x1b[1;0A",        "\x1b[1;1:4A",        "\x1b[1;1;55296A",
         "\x1b[3;0~",        "\x1b[3;1:4~",        "\x1b[3;1;55296~",
     };
     for (invalid) |bytes| {
         var parser: Parser = .{};
         const result = try parser.parse(bytes, null);
-        try testing.expect(result.invalid);
         try testing.expectEqual(@as(?Event, .invalid_key), result.event);
         try testing.expectEqual(bytes.len, result.n);
         const following = try parser.parse("z", null);
@@ -2251,14 +2314,35 @@ test "strict keyboard: malformed fields remain invalid rather than ordinary Ente
     }
 }
 
-test "strict keyboard: modifier and event limits preserve valid encodings" {
+test "parse: xterm modifyOtherKeys" {
+    var parser: Parser = .{};
+    // Shift-Enter and Ctrl-Alt-c, as Ghostty and xterm send them.
+    const shift_enter = try parser.parse("\x1b[27;2;13~", null);
+    try testing.expectEqual(10, shift_enter.n);
+    try testing.expectEqual(@as(?Event, .{ .key_press = .{ .codepoint = Key.enter, .mods = .{ .shift = true } } }), shift_enter.event);
+    const ctrl_alt_c = try parser.parse("\x1b[27;7;99~", null);
+    try testing.expectEqual(@as(?Event, .{ .key_press = .{ .codepoint = 'c', .mods = .{ .alt = true, .ctrl = true } } }), ctrl_alt_c.event);
+    // CSI 27 ~ alone is unknown; with fields, a malformed one is invalid.
+    const bare = try parser.parse("\x1b[27~", null);
+    try testing.expectEqual(@as(?Event, null), bare.event);
+    try testing.expectEqual(5, bare.n);
+    for ([_][]const u8{
+        "\x1b[27;0;13~",    "\x1b[27;17;13~",     "\x1b[27;1~",
+        "\x1b[27;1;55296~", "\x1b[27;1;1114112~", "\x1b[27;1;13;1~",
+    }) |bytes| {
+        const result = try parser.parse(bytes, null);
+        try testing.expectEqual(@as(?Event, .invalid_key), result.event);
+        try testing.expectEqual(bytes.len, result.n);
+    }
+}
+
+test "parse: every valid key modifier and event type, and no other" {
     var parser: Parser = .{};
     var buffer: [64]u8 = undefined;
     for (0..258) |modifier| for (0..5) |event_type| {
         const bytes = try std.fmt.bufPrint(&buffer, "\x1b[13;{d}:{d}u", .{ modifier, event_type });
         const result = try parser.parse(bytes, null);
         const valid = modifier >= 1 and modifier <= 256 and event_type >= 1 and event_type <= 3;
-        try testing.expectEqual(!valid, result.invalid);
         if (valid) {
             const key = if (event_type == 3) result.event.?.key_release else result.event.?.key_press;
             try testing.expectEqual(@as(u21, 13), key.codepoint);
@@ -2267,7 +2351,7 @@ test "strict keyboard: modifier and event limits preserve valid encodings" {
     };
 }
 
-test "strict keyboard: associated text fits completely or rejects the event" {
+test "parse: associated text fits whole or the key is invalid" {
     for ([_][]const u8{ "\x1b[13;1;", "\x1b[1;1;", "\x1b[3;1;" }, [_]u8{ 'u', 'A', '~' }) |prefix, final| {
         for ([_]usize{ 128, 129 }) |length| {
             var parser: Parser = .{};
@@ -2280,47 +2364,7 @@ test "strict keyboard: associated text fits completely or rejects the event" {
             }
             try out.writeByte(final);
             const result = try parser.parse(out.buffered(), null);
-            try testing.expectEqual(length == 129, result.invalid);
             if (length == 128) try testing.expectEqual(length, result.event.?.key_press.text.?.len) else try testing.expectEqual(@as(?Event, .invalid_key), result.event);
         }
     }
-}
-
-test "parse: a malformed character covers only its maximal subpart" {
-    const alloc = testing.allocator_instance.allocator();
-    var parser: Parser = .{};
-    // A lead byte whose character the next byte breaks is one replacement
-    // key; the byte that broke it, here Enter, is read on its own.
-    const broken = try parser.parse("\xc3\r", alloc);
-    try testing.expectEqual(1, broken.n);
-    try testing.expectEqual(0xFFFD, broken.event.?.key_press.codepoint);
-    try testing.expectEqualStrings("\xc3", broken.event.?.key_press.text.?);
-    const enter = try parser.parse("\r", alloc);
-    try testing.expectEqual(@as(?Event, .{ .key_press = .{ .codepoint = Key.enter } }), enter.event);
-    // The valid prefix of a three-byte character stays in the replacement.
-    const prefix = try parser.parse("\xe2\x82(", alloc);
-    try testing.expectEqual(2, prefix.n);
-    // A second byte outside its lead's range ends the subpart at the lead.
-    const surrogate = try parser.parse("\xed\xa0\x80", alloc);
-    try testing.expectEqual(1, surrogate.n);
-    // Alt with a broken character keeps the byte after it as well.
-    const alt = try parser.parse("\x1b\xc3\r", alloc);
-    try testing.expectEqual(2, alt.n);
-    try testing.expect(alt.invalid);
-}
-
-test "parse: a character split across reads waits for the rest" {
-    const alloc = testing.allocator_instance.allocator();
-    var parser: Parser = .{};
-    // A valid prefix at the end of the input is a character still arriving,
-    // never a key: emitting it would cut the character in two.
-    for ([_][]const u8{ "\xe4", "\xe4\xb8", "\xf0\x9f", "\xf0\x9f\x98" }) |prefix| {
-        const waiting = try parser.parse(prefix, alloc);
-        try testing.expectEqual(0, waiting.n);
-        try testing.expectEqual(@as(?Event, null), waiting.event);
-    }
-    const whole = try parser.parse("\xe4\xb8\xadZ", alloc);
-    try testing.expectEqual(3, whole.n);
-    try testing.expectEqual(0x4E2D, whole.event.?.key_press.codepoint);
-    try testing.expectEqualStrings("\xe4\xb8\xad", whole.event.?.key_press.text.?);
 }

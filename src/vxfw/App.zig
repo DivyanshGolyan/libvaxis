@@ -635,6 +635,47 @@ const FocusHandler = struct {
     }
 };
 
+test "a focus request made while handling focus_in is applied" {
+    const testing = std.testing;
+    const Node = struct {
+        child: ?*@This() = null,
+
+        fn widget(self: *@This()) Widget {
+            return .{ .userdata = self, .eventHandler = handle, .drawFn = draw };
+        }
+
+        // A container hands the focus it receives to its child.
+        fn handle(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (event == .focus_in) if (self.child) |child| try ctx.requestFocus(child.widget());
+        }
+
+        fn draw(_: *anyopaque, _: vxfw.DrawContext) Allocator.Error!vxfw.Surface {
+            unreachable;
+        }
+    };
+    var app: App = .{
+        .io = testing.io,
+        .allocator = testing.allocator,
+        .tty = undefined,
+        .vx = undefined,
+        .timers = .empty,
+        .wants_focus = null,
+    };
+    var leaf: Node = .{};
+    var screen: Node = .{ .child = &leaf };
+    var root: Node = .{};
+    var focus = FocusHandler.init(testing.allocator, root.widget());
+    defer focus.deinit(testing.allocator);
+    var ctx: vxfw.EventContext = .{ .io = testing.io, .alloc = testing.allocator, .cmds = .empty };
+    defer ctx.cmds.deinit(testing.allocator);
+
+    app.wants_focus = screen.widget();
+    try app.updateFocus(&ctx, &focus);
+    try testing.expect(focus.focused_widget.eql(leaf.widget()));
+    try testing.expectEqual(@as(?Widget, null), app.wants_focus);
+}
+
 test "FocusHandler: removed focus falls back to root without calling the removed widget" {
     const testing = std.testing;
     const Record = struct {
@@ -909,6 +950,15 @@ test "timer consume does not leak to the next event" {
     try testing.expect(ctx.redraw);
     try testing.expect(!ctx.consume_event);
     try testing.expectEqual(vxfw.EventContext.Phase.capturing, ctx.phase);
+}
+
+test "init releases the terminal when Vaxis fails to initialize" {
+    var env = try std.testing.environ.createMap(std.testing.allocator);
+    defer env.deinit();
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    // The test terminal allocates from the testing allocator, which reports
+    // it as a leak if init fails without releasing it.
+    try std.testing.expectError(error.OutOfMemory, App.init(std.testing.io, failing.allocator(), &env, &.{}));
 }
 
 test "MouseHandler: negative coordinates leave the hovered widget" {
