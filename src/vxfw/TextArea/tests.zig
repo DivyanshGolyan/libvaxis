@@ -726,3 +726,31 @@ test "a streaming text check gives setText's verdict at every split" {
         }
     };
 }
+
+test "an explicit width method measures wrapping, the caret and cells whatever the frame's" {
+    const draft = "a👩‍💻b";
+    var storage: [32]u8 = undefined;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    // The frame's method is process-wide; leave it at its default after.
+    defer vxfw.DrawContext.init(.unicode);
+    for ([_]vaxis.gwidth.Method{ .unicode, .wcwidth, .no_zwj }) |method| for ([_]vaxis.gwidth.Method{ .unicode, .wcwidth, .no_zwj }) |global| {
+        errdefer std.debug.print("method={s} frame={s}\n", .{ @tagName(method), @tagName(global) });
+        vxfw.DrawContext.init(global);
+        var area = T.init(&storage);
+        area.width_method = method;
+        _ = area.setText(draft, draft.len);
+        const emoji: u16 = @intCast(vaxis.gwidth.gwidth("👩‍💻", method));
+        // Wide enough for all of it: the caret follows the method's widths.
+        const wide = try area.draw(drawContext(arena.allocator(), 20, 4));
+        try testing.expectEqual(@as(usize, 1), area.viewport().total);
+        try testing.expectEqual(1 + emoji + 1, wide.cursor.?.col);
+        try testing.expectEqual(@as(u16, emoji), wide.readCell(1, 0).char.width);
+        try testing.expectEqualStrings("b", wide.readCell(1 + emoji, 0).char.grapheme);
+        // One column short of all of it: "b" wraps to the next row.
+        const narrow = try area.draw(drawContext(arena.allocator(), 1 + emoji, 4));
+        try testing.expectEqual(@as(usize, 2), area.viewport().total);
+        try testing.expectEqualStrings("b", narrow.readCell(0, 1).char.grapheme);
+        try testing.expectEqual(@as(u16, 1), narrow.cursor.?.col);
+    };
+}
