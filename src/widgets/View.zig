@@ -59,7 +59,9 @@ pub const DrawOptions = struct {
     y_off: u16 = 0,
 };
 
-pub fn draw(self: *View, win: Window, opts: DrawOptions) void {
+/// Copies image placements into the destination screen; the view may then be
+/// cleared or destroyed without invalidating those placements.
+pub fn draw(self: *View, win: Window, opts: DrawOptions) mem.Allocator.Error!void {
     if (opts.x_off >= self.screen.width) return;
     if (opts.y_off >= self.screen.height) return;
 
@@ -72,7 +74,9 @@ pub fn draw(self: *View, win: Window, opts: DrawOptions) void {
         const src_end: usize = @intCast(src_start + width);
         const dst_start: usize = @intCast(win.x_off + ((row + win.y_off) * win.screen.width));
         const dst_end: usize = @intCast(dst_start + width);
-        @memcpy(win.screen.buf[dst_start..dst_end], self.screen.buf[src_start..src_end]);
+        for (win.screen.buf[dst_start..dst_end], self.screen.buf[src_start..src_end]) |*dst, src| {
+            dst.* = try win.screen.copyCell(src);
+        }
     }
 }
 
@@ -116,7 +120,7 @@ pub fn toWin(self: *View, win: Window, config: RenderConfig) !struct { u16, u16 
         .width = width,
         .height = height,
     });
-    self.draw(child, .{ .x_off = x, .y_off = y });
+    try self.draw(child, .{ .x_off = x, .y_off = y });
     return .{ x, y };
 }
 

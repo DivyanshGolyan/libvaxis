@@ -18,6 +18,10 @@ height_pix: u16 = 0,
 
 buf: []Cell = &.{},
 
+// Individual arena allocations remain stable as more images are drawn. The
+// arena owns placements, not image pixels, and is released with a full clear.
+image_arena: ?std.heap.ArenaAllocator = null,
+
 cursor: Cursor = .{},
 cursor_vis: bool = false,
 cursor_secondary: []Cursor = &.{},
@@ -32,6 +36,7 @@ pub fn init(alloc: std.mem.Allocator, winsize: Winsize) std.mem.Allocator.Error!
     const h = winsize.rows;
     const self = Screen{
         .buf = try alloc.alloc(Cell, @as(usize, @intCast(w)) * h),
+        .image_arena = .init(alloc),
         .width = w,
         .height = h,
         .width_pix = winsize.x_pixel,
@@ -43,10 +48,27 @@ pub fn init(alloc: std.mem.Allocator, winsize: Winsize) std.mem.Allocator.Error!
 }
 
 pub fn deinit(self: *Screen, alloc: std.mem.Allocator) void {
+    if (self.image_arena) |*arena| arena.deinit();
     alloc.free(self.buf);
 }
 
-/// writes a cell to a location. 0 indexed
+/// Copy a cell's image placement into this screen. Text and links remain
+/// borrowed, as with writeCell. The returned image reference is valid until a
+/// full clear or deinit of this screen, independently of the source cell.
+pub fn copyCell(self: *Screen, cell: Cell) std.mem.Allocator.Error!Cell {
+    var copy = cell;
+    if (cell.image) |image| {
+        const arena = if (self.image_arena) |*arena| arena else return error.OutOfMemory;
+        const placement = try arena.allocator().create(Image.Placement);
+        placement.* = image.*;
+        copy.image = placement;
+    }
+    return copy;
+}
+
+/// Writes a borrowed cell to a location. 0 indexed. Referenced data must remain
+/// valid until the cell is overwritten or the screen is cleared.
+/// Window.writeCellOwned copies image placements instead.
 pub fn writeCell(self: *Screen, col: u16, row: u16, cell: Cell) void {
     if (col >= self.width or
         row >= self.height)
@@ -65,8 +87,16 @@ pub fn readCell(self: *const Screen, col: u16, row: u16) ?Cell {
     return self.buf[i];
 }
 
+/// Fill the screen, releasing old image placements when the fill has no image.
+pub fn fill(self: *Screen, cell: Cell) void {
+    @memset(self.buf, cell);
+    if (cell.image == null) {
+        if (self.image_arena) |*arena| _ = arena.reset(.free_all);
+    }
+}
+
 pub fn clear(self: *Screen) void {
-    @memset(self.buf, .{});
+    self.fill(.{});
 }
 
 test "refAllDecls" {

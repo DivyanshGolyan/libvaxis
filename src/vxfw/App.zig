@@ -257,7 +257,7 @@ fn render(
         .width = surface.size.width,
         .height = surface.size.height,
     });
-    surface.render(root_win, focused_widget);
+    try surface.render(root_win, focused_widget);
 
     try vx.render(tty.writer());
 }

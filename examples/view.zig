@@ -158,7 +158,7 @@ pub fn main(init: std.process.Init) !void {
         x = @min(x, map_width -| map_win.width);
         y = @min(y, map_height -| map_win.height);
 
-        map_view.draw(map_win, .{
+        try map_view.draw(map_win, .{
             .x_off = x,
             .y_off = y,
         });
