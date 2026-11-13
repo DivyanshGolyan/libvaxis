@@ -39,7 +39,7 @@ pub fn draw(self: *const Text, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surfa
 
     // Create a surface of target width and max height. We'll trim the result after drawing
     const surface = try vxfw.Surface.init(
-        ctx.arena,
+        ctx.cell_arena,
         self.widget(),
         container_size,
     );
@@ -301,6 +301,7 @@ test "SoftwrapIterator: LF breaks" {
         .min = .{ .width = 0, .height = 0 },
         .max = .{ .width = 20, .height = 10 },
         .arena = arena.allocator(),
+        .cell_arena = arena.allocator(),
         .cell_size = .{ .width = 10, .height = 20 },
     };
     var iter = SoftwrapIterator.init("Hello, \n world", ctx);
@@ -327,6 +328,7 @@ test "SoftwrapIterator: soft breaks that fit" {
         .min = .{ .width = 0, .height = 0 },
         .max = .{ .width = 6, .height = 10 },
         .arena = arena.allocator(),
+        .cell_arena = arena.allocator(),
         .cell_size = .{ .width = 10, .height = 20 },
     };
     var iter = SoftwrapIterator.init("Hello, \nworld", ctx);
@@ -353,6 +355,7 @@ test "SoftwrapIterator: soft breaks that are longer than width" {
         .min = .{ .width = 0, .height = 0 },
         .max = .{ .width = 6, .height = 10 },
         .arena = arena.allocator(),
+        .cell_arena = arena.allocator(),
         .cell_size = .{ .width = 10, .height = 20 },
     };
     var iter = SoftwrapIterator.init("very-long-word \nworld", ctx);
@@ -389,6 +392,7 @@ test "SoftwrapIterator: soft breaks with leading spaces" {
         .min = .{ .width = 0, .height = 0 },
         .max = .{ .width = 6, .height = 10 },
         .arena = arena.allocator(),
+        .cell_arena = arena.allocator(),
         .cell_size = .{ .width = 10, .height = 20 },
     };
     var iter = SoftwrapIterator.init("Hello,        \n world", ctx);
@@ -482,6 +486,7 @@ test Text {
     // These values are asserted in draw
     const ctx: vxfw.DrawContext = .{
         .arena = arena.allocator(),
+        .cell_arena = arena.allocator(),
         .min = .{},
         .max = .{ .width = 7, .height = 2 },
         .cell_size = .{ .width = 10, .height = 20 },

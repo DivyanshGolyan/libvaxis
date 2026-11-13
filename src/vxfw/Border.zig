@@ -59,7 +59,7 @@ pub fn draw(self: *const Border, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Sur
 
     const size: vxfw.Size = .{ .width = child.size.width + 2, .height = child.size.height + 2 };
 
-    var surf = try vxfw.Surface.initWithChildren(ctx.arena, self.widget(), size, children);
+    var surf = try vxfw.Surface.initWithChildren(ctx.cell_arena, self.widget(), size, children);
 
     // Draw the border
     const right_edge = size.width -| 1;
@@ -126,6 +126,7 @@ test Border {
     // Border will draw itself tightly around the child
     const ctx: vxfw.DrawContext = .{
         .arena = arena.allocator(),
+        .cell_arena = arena.allocator(),
         .min = .{},
         .max = .{ .width = 10, .height = 10 },
         .cell_size = .{ .width = 10, .height = 20 },

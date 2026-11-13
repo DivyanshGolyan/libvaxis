@@ -109,7 +109,7 @@ pub fn draw(self: *Button, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surface {
     const center: Center = .{ .child = text.widget() };
     const surf = try center.draw(ctx);
 
-    const button_surf = try vxfw.Surface.initWithChildren(ctx.arena, self.widget(), surf.size, surf.children);
+    const button_surf = try vxfw.Surface.initWithChildren(ctx.cell_arena, self.widget(), surf.size, surf.children);
     @memset(button_surf.buffer, .{ .style = style });
     return button_surf;
 }
@@ -194,6 +194,7 @@ test Button {
 
     const draw_ctx: vxfw.DrawContext = .{
         .arena = arena.allocator(),
+        .cell_arena = arena.allocator(),
         .min = .{},
         .max = .{ .width = 13, .height = 3 },
         .cell_size = .{ .width = 10, .height = 20 },

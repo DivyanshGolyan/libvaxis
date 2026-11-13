@@ -431,7 +431,7 @@ pub fn draw(self: *ScrollBars, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surfa
         // Once we know the thumb height and its position we can draw the scroll bar.
 
         const scroll_bar = try vxfw.Surface.init(
-            ctx.arena,
+            ctx.cell_arena,
             self.widget(),
             .{
                 .width = 1,
@@ -472,7 +472,7 @@ pub fn draw(self: *ScrollBars, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surfa
 
     if (self.draw_horizontal_scrollbar and should_draw_scrollbar) {
         const scroll_bar = try vxfw.Surface.init(
-            ctx.arena,
+            ctx.cell_arena,
             self.widget(),
             .{ .width = max.width, .height = 1 },
         );
@@ -578,6 +578,7 @@ test ScrollBars {
     const scroll_widget = scroll_bars.widget();
     const draw_ctx: vxfw.DrawContext = .{
         .arena = arena.allocator(),
+        .cell_arena = arena.allocator(),
         .min = .{},
         .max = .{ .width = 3, .height = 4 },
         .cell_size = .{ .width = 10, .height = 20 },

@@ -90,6 +90,8 @@ pub fn run(self: *App, widget: vxfw.Widget, opts: Options) anyerror!void {
     // Set up arena and context
     var arena = std.heap.ArenaAllocator.init(self.allocator);
     defer arena.deinit();
+    var cell_arena = std.heap.ArenaAllocator.init(self.allocator);
+    defer cell_arena.deinit();
 
     var mouse_handler = MouseHandler.init(widget);
     defer mouse_handler.deinit(self.allocator);
@@ -143,7 +145,7 @@ pub fn run(self: *App, widget: vxfw.Widget, opts: Options) anyerror!void {
 
         const surface: vxfw.Surface = blk: {
             // Draw the root widget
-            const surface = try self.doLayout(widget, &arena);
+            const surface = try self.doLayout(widget, &arena, &cell_arena);
 
             // Check if any hover or mouse effects changed
             try mouse_handler.updateMouse(self, surface, &ctx);
@@ -153,14 +155,14 @@ pub fn run(self: *App, widget: vxfw.Widget, opts: Options) anyerror!void {
             assert(ctx.cmds.items.len == 0);
             if (!ctx.redraw) break :blk surface;
             // If updating the mouse required a redraw, we do the layout again
-            break :blk try self.doLayout(widget, &arena);
+            break :blk try self.doLayout(widget, &arena, &cell_arena);
         };
 
         // Store the last frame
         mouse_handler.last_frame = surface;
         // Update the focus handler list
         try focus_handler.update(self.allocator, surface);
-        try self.render(surface, focus_handler.focused_widget);
+        try self.render(surface, focus_handler.focused_widget, &cell_arena);
     }
 }
 
@@ -222,11 +224,13 @@ fn doLayout(
     self: *App,
     widget: vxfw.Widget,
     arena: *std.heap.ArenaAllocator,
+    cell_arena: *std.heap.ArenaAllocator,
 ) !vxfw.Surface {
     const vx = &self.vx;
 
     const draw_context: vxfw.DrawContext = .{
         .arena = arena.allocator(),
+        .cell_arena = cell_arena.allocator(),
         .min = .{ .width = 0, .height = 0 },
         .max = .{
             .width = @intCast(vx.screen.width),
@@ -244,7 +248,11 @@ fn render(
     self: *App,
     surface: vxfw.Surface,
     focused_widget: vxfw.Widget,
+    cell_arena: *std.heap.ArenaAllocator,
 ) !void {
+    // The tree's metadata stays alive for event dispatch, but its cells are no
+    // longer needed once vx.render has emitted the frame. Release even on error.
+    defer _ = cell_arena.reset(.free_all);
     const vx = &self.vx;
     const tty = &self.tty;
 
@@ -1054,7 +1062,7 @@ test "App layout returns from zero width and zero height" {
         fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surface {
             const self: *@This() = @ptrCast(@alignCast(raw));
             self.cells = ctx.cell_size;
-            return vxfw.Surface.init(ctx.arena, .{ .userdata = self, .drawFn = draw }, ctx.max.size());
+            return vxfw.Surface.init(ctx.cell_arena, .{ .userdata = self, .drawFn = draw }, ctx.max.size());
         }
     };
     var app: App = undefined;
@@ -1065,19 +1073,127 @@ test "App layout returns from zero width and zero height" {
     for ([_]vxfw.Size{ .{ .width = 0, .height = 1 }, .{ .width = 1, .height = 0 } }) |empty| {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
+        var cell_arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer cell_arena.deinit();
         app.vx.screen.width = empty.width;
         app.vx.screen.height = empty.height;
-        const hidden = try app.doLayout(widget, &arena);
+        const hidden = try app.doLayout(widget, &arena, &cell_arena);
         try std.testing.expectEqual(empty, hidden.size);
         try std.testing.expectEqual(@as(usize, 0), hidden.buffer.len);
         try std.testing.expectEqual(@as(u16, if (empty.width == 0) 0 else 800), probe.cells.width);
         try std.testing.expectEqual(@as(u16, if (empty.height == 0) 0 else 240), probe.cells.height);
         app.vx.screen.width = 80;
         app.vx.screen.height = 24;
-        const visible = try app.doLayout(widget, &arena);
+        const visible = try app.doLayout(widget, &arena, &cell_arena);
         try std.testing.expectEqual(vxfw.Size{ .width = 80, .height = 24 }, visible.size);
         try std.testing.expectEqual(@as(usize, 1920), visible.buffer.len);
         try std.testing.expectEqual(vxfw.Size{ .width = 10, .height = 10 }, probe.cells);
+    }
+}
+
+test "render frees cell buffers between frames and preserves mouse and focus dispatch" {
+    const testing = std.testing;
+    const Observed = struct {
+        mouse_events: usize = 0,
+        key_events: usize = 0,
+        local: vxfw.Point = .{ .row = 0, .col = 0 },
+    };
+    const Child = struct {
+        observed: *Observed,
+        label: []const u8,
+
+        fn widget(self: *@This()) Widget {
+            return .{ .userdata = self, .drawFn = draw, .eventHandler = handle };
+        }
+
+        fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surface {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            const surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), ctx.max.size());
+            surface.writeCell(0, 0, .{ .char = .{ .grapheme = self.label[0..1] } });
+            return surface;
+        }
+
+        fn handle(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            // Both the widget and its label belong to the metadata arena.
+            try testing.expectEqualStrings("frame widget state", self.label);
+            if (ctx.phase != .at_target) return;
+            switch (event) {
+                .mouse => |mouse| {
+                    self.observed.mouse_events += 1;
+                    self.observed.local = .{ .row = @intCast(mouse.row), .col = @intCast(mouse.col) };
+                },
+                .key_press => self.observed.key_events += 1,
+                else => {},
+            }
+        }
+    };
+    const Root = struct {
+        observed: *Observed,
+
+        fn widget(self: *@This()) Widget {
+            return .{ .userdata = self, .drawFn = draw };
+        }
+
+        fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surface {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            const child = try ctx.arena.create(Child);
+            child.* = .{ .observed = self.observed, .label = try ctx.arena.dupe(u8, "frame widget state") };
+            const children = try ctx.arena.alloc(vxfw.SubSurface, 1);
+            children[0] = .{
+                .origin = .{ .row = 1, .col = 2 },
+                .surface = try child.widget().draw(ctx.withConstraints(.{}, .{ .width = 2, .height = 1 })),
+            };
+            return vxfw.Surface.initWithChildren(ctx.cell_arena, self.widget(), ctx.max.size(), children);
+        }
+    };
+    var env = try testing.environ.createMap(testing.allocator);
+    defer env.deinit();
+    var tty_buffer: [128]u8 = undefined;
+    var app = try App.init(testing.io, testing.allocator, &env, &tty_buffer);
+    defer app.deinit();
+    try app.vx.resize(testing.allocator, app.tty.writer(), .{ .cols = 5, .rows = 3, .x_pixel = 50, .y_pixel = 30 });
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var cell_arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer cell_arena.deinit();
+    var observed: Observed = .{};
+    var root: Root = .{ .observed = &observed };
+    var ctx: vxfw.EventContext = .{
+        .io = testing.io,
+        .alloc = testing.allocator,
+        .phase = .capturing,
+        .cmds = .empty,
+        .consume_event = false,
+        .redraw = false,
+        .quit = false,
+    };
+    defer ctx.cmds.deinit(testing.allocator);
+
+    for (0..2) |frame| {
+        // No cell allocations from the previous frame may survive until layout.
+        try testing.expectEqual(@as(usize, 0), cell_arena.queryCapacity());
+        _ = arena.reset(.free_all);
+        const surface = try app.doLayout(root.widget(), &arena, &cell_arena);
+        try testing.expect(cell_arena.queryCapacity() > 0);
+        var mouse = MouseHandler.init(root.widget());
+        defer mouse.deinit(testing.allocator);
+        mouse.last_frame = surface;
+        var focus = FocusHandler.init(testing.allocator, root.widget());
+        defer focus.deinit(testing.allocator);
+        focus.focused_widget = surface.children[0].surface.widget;
+        try focus.update(testing.allocator, surface);
+
+        // This is the same render path used by App.run, not a manual reset.
+        try app.render(surface, focus.focused_widget, &cell_arena);
+        try testing.expectEqual(@as(usize, 0), cell_arena.queryCapacity());
+        try testing.expect(arena.queryCapacity() > 0);
+        try testing.expectEqualStrings("f", app.vx.screen.readCell(2, 1).?.char.grapheme);
+        try mouse.handleMouse(&app, &ctx, .{ .row = 1, .col = 3, .button = .none, .mods = .{}, .type = .motion });
+        try testing.expectEqual(frame + 1, observed.mouse_events);
+        try testing.expectEqual(vxfw.Point{ .row = 0, .col = 1 }, observed.local);
+        try focus.handleEvent(&ctx, .{ .key_press = .{ .codepoint = 'x' } });
+        try testing.expectEqual(frame + 1, observed.key_events);
     }
 }
 

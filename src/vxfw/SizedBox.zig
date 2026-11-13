@@ -63,6 +63,7 @@ test SizedBox {
 
     var draw_ctx: vxfw.DrawContext = .{
         .arena = arena.allocator(),
+        .cell_arena = arena.allocator(),
         .min = .{},
         .max = .{ .width = 16, .height = 16 },
         .cell_size = .{ .width = 10, .height = 20 },

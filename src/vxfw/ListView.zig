@@ -327,7 +327,7 @@ fn drawBuilder(self: *ListView, ctx: vxfw.DrawContext, builder: Builder) Allocat
     if (self.draw_cursor) {
         // If we are drawing the cursor, we need to allocate a buffer so that we obscure anything
         // underneath us
-        surface.buffer = try vxfw.Surface.createBuffer(ctx.arena, max_size);
+        surface.buffer = try vxfw.Surface.createBuffer(ctx.cell_arena, max_size);
     }
 
     // Set state
@@ -440,7 +440,7 @@ fn drawBuilder(self: *ListView, ctx: vxfw.DrawContext, builder: Builder) Allocat
         };
         const size = child.surface.size;
         const cursor_surf = try vxfw.Surface.initWithChildren(
-            ctx.arena,
+            ctx.cell_arena,
             self.widget(),
             .{ .width = child_offset + size.width, .height = size.height },
             sub,
@@ -576,6 +576,7 @@ test ListView {
     const list_widget = list_view.widget();
     const draw_ctx: vxfw.DrawContext = .{
         .arena = arena.allocator(),
+        .cell_arena = arena.allocator(),
         .min = .{},
         .max = .{ .width = 16, .height = 4 },
         .cell_size = .{ .width = 10, .height = 20 },
@@ -744,6 +745,7 @@ test "ListView: jumpToItem avoids walking intermediate children" {
 
     const draw_ctx: vxfw.DrawContext = .{
         .arena = arena.allocator(),
+        .cell_arena = arena.allocator(),
         .min = .{},
         .max = .{ .width = 16, .height = 4 },
         .cell_size = .{ .width = 10, .height = 20 },
@@ -809,6 +811,7 @@ test "ListView: scrollToBottom avoids walking intermediate children" {
 
     const draw_ctx: vxfw.DrawContext = .{
         .arena = arena.allocator(),
+        .cell_arena = arena.allocator(),
         .min = .{},
         .max = .{ .width = 16, .height = 4 },
         .cell_size = .{ .width = 10, .height = 20 },
@@ -884,6 +887,7 @@ test "ListView: uneven scroll" {
     const list_widget = list_view.widget();
     const draw_ctx: vxfw.DrawContext = .{
         .arena = arena.allocator(),
+        .cell_arena = arena.allocator(),
         .min = .{},
         .max = .{ .width = 16, .height = 4 },
         .cell_size = .{ .width = 10, .height = 20 },

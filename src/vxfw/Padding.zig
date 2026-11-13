@@ -118,6 +118,7 @@ test Padding {
     // These values are asserted in draw
     const ctx: vxfw.DrawContext = .{
         .arena = arena.allocator(),
+        .cell_arena = arena.allocator(),
         .min = .{},
         .max = .{ .width = 10, .height = 10 },
         .cell_size = .{ .width = 10, .height = 20 },

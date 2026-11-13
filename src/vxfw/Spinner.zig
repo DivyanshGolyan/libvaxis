@@ -86,7 +86,7 @@ pub fn draw(self: *Spinner, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surface 
         .height = @max(1, ctx.min.height),
     };
 
-    const surface = try vxfw.Surface.init(ctx.arena, self.widget(), size);
+    const surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), size);
     @memset(surface.buffer, .{ .style = self.style });
 
     if (self.count.load(.unordered) == 0) return surface;
@@ -140,6 +140,7 @@ test Spinner {
     // Simulate a draw
     const surface = try spinner_widget.draw(.{
         .arena = arena.allocator(),
+        .cell_arena = arena.allocator(),
         .min = .{},
         .max = .{},
         .cell_size = .{ .width = 10, .height = 20 },
