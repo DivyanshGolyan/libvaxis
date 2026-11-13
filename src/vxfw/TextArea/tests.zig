@@ -703,3 +703,26 @@ test "a paste segments only near its insertion point, at the end or in the middl
         try testing.expectEqual(pasted, area.byteOffsetToCursor());
     };
 }
+
+fn noFormat(_: ?*anyopaque, cp: u21) bool {
+    return cp != 0x200b;
+}
+
+test "a streaming text check gives setText's verdict at every split" {
+    const inputs = [_][]const u8{ "plain", "\u{301}x", "e\u{301}", "a\nb\tc", "\x01", "x\x7f", "\xff", "\xc3", "ok\u{200b}", "🧑\u{200d}🌾", "\n\u{301}", "\u{200d}", "a\u{fe0f}", "é\xe2\x82" };
+    var storage: [32]u8 = undefined;
+    for (inputs) |input| for ([_]bool{ false, true }) |policy| {
+        var area = T.init(&storage);
+        if (policy) area.acceptScalar = noFormat;
+        const verdict = area.setText(input, 0).failure;
+        for (0..input.len + 1) |split| {
+            errdefer std.debug.print("input={any} split={d} policy={}\n", .{ input, split, policy });
+            var check = area.textCheck();
+            check.feed(input[0..split]);
+            check.feed(input[split..]);
+            // setText rejects malformed UTF-8 before any scalar policy.
+            const streamed = check.finish();
+            if (verdict == .invalid_utf8) try testing.expect(streamed != null) else try testing.expectEqual(verdict, streamed);
+        }
+    };
+}
