@@ -431,15 +431,16 @@ pub const Surface = struct {
         }
     }
 
-    /// Copies all cells from Surface to Window
-    pub fn render(self: Surface, win: vaxis.Window, focused: Widget) void {
+    /// Copies all cells from Surface to Window, including image placements.
+    /// Source placements need only remain valid until this call returns.
+    pub fn render(self: Surface, win: vaxis.Window, focused: Widget) Allocator.Error!void {
         // render self first
         if (self.buffer.len > 0) {
             assert(self.buffer.len == self.size.width * self.size.height);
             for (self.buffer, 0..) |cell, i| {
                 const row = i / self.size.width;
                 const col = i % self.size.width;
-                win.writeCell(@intCast(col), @intCast(row), cell);
+                try win.writeCellOwned(@intCast(col), @intCast(row), cell);
             }
         }
 
@@ -461,7 +462,7 @@ pub const Surface = struct {
                 .width = @intCast(child.surface.size.width),
                 .height = @intCast(child.surface.size.height),
             });
-            child.surface.render(child_win, focused);
+            try child.surface.render(child_win, focused);
         }
     }
 

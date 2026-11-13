@@ -186,6 +186,15 @@ pub fn writeCell(self: Window, col: u16, row: u16, cell: Cell) void {
     self.screen.writeCell(@intCast(col + self.x_off), @intCast(row + self.y_off), cell);
 }
 
+/// Like writeCell, but copies the image placement into the destination screen.
+/// The source placement only needs to remain valid for this call. The screen
+/// releases its copy on a full clear or deinit. Text and links remain borrowed.
+pub fn writeCellOwned(self: Window, col: u16, row: u16, cell: Cell) std.mem.Allocator.Error!void {
+    // Use the same clipping as writeCell, without allocating for clipped cells.
+    if (self.readCell(col, row) == null) return;
+    self.writeCell(col, row, try self.screen.copyCell(cell));
+}
+
 /// reads a cell at the location in the window
 pub fn readCell(self: Window, col: u16, row: u16) ?Cell {
     if (self.height <= row or
@@ -215,6 +224,12 @@ pub fn fill(self: Window, cell: Cell) void {
         self.screen.width < self.x_off or
         self.screen.height < self.y_off)
         return;
+    if (self.x_off == 0 and self.y_off == 0 and
+        self.width == self.screen.width and self.height == self.screen.height)
+    {
+        self.screen.fill(cell);
+        return;
+    }
     const first_row: usize = @intCast(@max(self.y_off, 0));
     if (self.x_off == 0 and self.width == self.screen.width) {
         // we have a full width window, therefore contiguous memory.

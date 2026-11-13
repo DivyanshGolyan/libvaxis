@@ -4,7 +4,10 @@ const Image = @import("Image.zig");
 char: Character = .{},
 style: Style = .{},
 link: Hyperlink = .{},
-image: ?Image.Placement = null,
+/// Image placement, borrowed by raw cell writes. Use Window.writeCellOwned
+/// to copy a placement into the destination screen, or Image.draw to create
+/// one without managing its lifetime.
+image: ?*const Image.Placement = null,
 default: bool = false,
 /// Set to true if this cell is the last cell printed in a row before wrap. Vaxis will determine if
 /// it should rely on the terminal's autowrap feature which can help with primary screen resizes
@@ -222,4 +225,8 @@ pub const Color = union(enum) {
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+test "Cell stores only an image reference" {
+    if (@sizeOf(usize) == 8) try std.testing.expectEqual(@as(usize, 88), @sizeOf(@This()));
 }

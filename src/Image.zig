@@ -174,7 +174,7 @@ pub fn draw(self: Image, win: Window, opts: DrawOptions) !void {
         .img_id = self.id,
         .options = p_opts,
     };
-    win.writeCell(0, 0, .{ .image = p });
+    try win.writeCellOwned(0, 0, .{ .image = &p });
 }
 
 /// the size of the image, in cells
@@ -197,5 +197,6 @@ pub fn cellSize(self: Image, win: Window) !CellSize {
 }
 
 test {
+    _ = @import("image_ref_test.zig");
     std.testing.refAllDecls(@This());
 }
