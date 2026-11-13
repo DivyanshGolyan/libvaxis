@@ -645,3 +645,61 @@ test "default deletion notifications retain typed origin" {
     _ = try area.dispatch(&ctx, .delete_previous);
     try testing.expectEqual(T.Origin.programmatic, observer.origin);
 }
+
+/// The caret a repair from byte 0 gives: the end of the grapheme that holds
+/// the byte before `at`.
+fn fullScanCaret(bytes: []const u8, at: usize) usize {
+    if (at == 0) return 0;
+    var it = vaxis.unicode.graphemeIterator(bytes);
+    while (it.next()) |g| if (g.start + g.len >= at) return g.start + g.len;
+    return bytes.len;
+}
+
+test "insertion repairs the caret as a scan from byte 0 would, typed or pasted, at every boundary" {
+    const texts = [_][]const u8{ "ab", "🇫🇷🇩🇪", "🧑\u{200d}🌾x", "e\u{301}\u{302}y", "\u{1100}\u{1161}\u{11a8}", "a\nb\tc", "🇫🇷x🇩🇪" };
+    const scalars = [_][]const u8{ "z", "\u{301}", "\u{200d}", "🇫", "🇷", "🌾", "\u{fe0f}", "\u{1161}", "\u{11a8}", "\n" };
+    var storage: [64]u8 = undefined;
+    for (texts) |initial| {
+        var at: usize = 0;
+        while (at <= initial.len) : (at += 1) {
+            if (at != initial.len and fullScanCaret(initial, at) != at) continue;
+            for (scalars) |scalar| for ([_]bool{ false, true }) |pasted| {
+                errdefer std.debug.print("text={s} at={d} scalar={any} pasted={}\n", .{ initial, at, scalar, pasted });
+                var area = T.init(&storage);
+                try testing.expectEqual(@as(?T.Failure, null), area.setText(initial, at).failure);
+                // The second scalar repairs from the boundary the first settled.
+                if (pasted) {
+                    _ = area.apply(.beginPaste);
+                    _ = area.apply(.{ .feedPaste = scalar });
+                    _ = area.apply(.{ .feedPaste = scalar });
+                    if (area.apply(.{ .endPaste = .explicit }).failure != null) continue;
+                    try testing.expectEqual(fullScanCaret(area.text(), at + 2 * scalar.len), area.byteOffsetToCursor());
+                } else for (0..2) |_| {
+                    const before = area.byteOffsetToCursor();
+                    if (insert(&area, scalar).failure != null) break;
+                    try testing.expectEqual(fullScanCaret(area.text(), before + scalar.len), area.byteOffsetToCursor());
+                }
+            };
+        }
+    }
+}
+
+test "a paste segments only near its insertion point, at the end or in the middle" {
+    const storage = try testing.allocator.alloc(u8, 64 * 1024);
+    defer testing.allocator.free(storage);
+    for ([_][]const u8{ "", "tail🇫🇷" }) |suffix| for ([_][]const u8{ "x", "e\u{301}", "🇫🇷", "🧑\u{200d}🌾" }) |unit| {
+        var area = T.init(storage);
+        _ = area.setText(suffix, 0);
+        _ = area.apply(.beginPaste);
+        var pasted: usize = 0;
+        while (pasted + unit.len + suffix.len <= storage.len) : (pasted += unit.len) {
+            _ = area.apply(.{ .feedPaste = unit });
+            // A repair walks from `settled` to the caret: that span is one
+            // grapheme or two, never the text before them.
+            if (suffix.len != 0) try testing.expect(area.byteOffsetToCursor() - area.settled <= 2 * unit.len);
+        }
+        try testing.expectEqual(@as(?T.Failure, null), area.apply(.{ .endPaste = .explicit }).failure);
+        try testing.expectEqual(pasted + suffix.len, area.text().len);
+        try testing.expectEqual(pasted, area.byteOffsetToCursor());
+    };
+}

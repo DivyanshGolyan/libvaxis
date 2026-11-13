@@ -22,6 +22,10 @@ partial_need: u3 = 0,
 paste_state: ?PasteState = null,
 anchor: usize = 0,
 view: View = .{},
+/// A grapheme boundary at or before the caret, from which a repair after an
+/// insertion segments instead of from byte 0. Edits before it reset it to 0.
+/// Internal: callers never need to set it.
+settled: usize = 0,
 
 style: vaxis.Style = .{},
 bindings: Bindings = .default,
@@ -211,6 +215,7 @@ pub fn setText(self: *TextArea, bytes: []const u8, at: usize) Result {
     }
     self.length = bytes.len;
     self.cursor = at;
+    self.settled = 0;
     self.partial_length = 0;
     return .{ .edit_count = count, .cursor_changed = cursor_changed };
 }
@@ -321,6 +326,7 @@ fn fail(self: *TextArea, failure: Failure, result: *Result) void {
             std.mem.copyForwards(u8, self.buffer[state.cursor..][0 .. self.length - state.cursor - added], self.buffer[state.cursor + added .. self.length]);
             self.length = state.length;
             self.cursor = state.cursor;
+            if (self.settled >= state.cursor) self.settled = 0;
             if (added != 0) result.edit_count += 1;
             state.rolled_back = true;
         }
@@ -353,13 +359,18 @@ fn insertByte(self: *TextArea, byte: u8, result: *Result) void {
         self.fail(.unrenderable, result);
         return;
     }
+    const at_end = insertion == self.length;
     std.mem.copyBackwards(u8, self.buffer[insertion + scalar.len .. self.length + scalar.len], self.buffer[insertion..self.length]);
     @memcpy(self.buffer[insertion..][0..scalar.len], scalar);
     self.length += scalar.len;
     self.cursor = insertion + scalar.len;
     self.partial_length = 0;
     result.edit_count += 1;
-    self.repair();
+    // The end of the text is always a boundary: an append needs no repair.
+    // Elsewhere the scalar can join what follows, so segment from a boundary
+    // before it; a boundary before the insertion point stays one.
+    if (self.settled >= insertion) self.settled = 0;
+    if (!at_end) self.repair();
 }
 
 fn previous(self: *const TextArea, position: usize) usize {
@@ -378,14 +389,29 @@ fn next(self: *const TextArea, position: usize) usize {
     return self.length;
 }
 
+/// Moves the caret to the end of the grapheme holding the byte before it,
+/// segmenting from `settled`: a fresh segmentation at a boundary yields the
+/// same graphemes after it, so the cost is the span from there to the caret.
 fn repair(self: *TextArea) void {
-    if (self.cursor != 0) self.cursor = self.next(self.cursor - 1);
+    if (self.cursor == 0) return;
+    if (self.settled >= self.cursor) self.settled = 0;
+    var it = unicode.graphemeIterator(self.buffer[self.settled..self.length]);
+    while (it.next()) |g| {
+        const start = self.settled + g.start;
+        if (start + g.len >= self.cursor) {
+            self.settled = start;
+            self.cursor = start + g.len;
+            return;
+        }
+    }
+    self.cursor = self.length;
 }
 
 fn erase(self: *TextArea, from: usize, to: usize, result: *Result) void {
     if (from == to) return;
     std.mem.copyForwards(u8, self.buffer[from .. self.length - (to - from)], self.buffer[to..self.length]);
     self.length -= to - from;
+    if (self.settled >= from) self.settled = 0;
     self.cursor = from;
     self.repair();
     result.edit_count += 1;
