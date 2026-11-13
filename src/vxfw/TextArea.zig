@@ -162,8 +162,12 @@ pub fn setCursor(self: *TextArea, at: usize) Result {
 }
 
 fn validScalar(self: *const TextArea, cp: u21) bool {
+    return acceptedScalar(self.acceptScalar, self.userdata, cp);
+}
+
+fn acceptedScalar(accept: ?*const fn (?*anyopaque, u21) bool, userdata: ?*anyopaque, cp: u21) bool {
     if ((cp < 0x20 and cp != '\n' and cp != '\t') or (cp >= 0x7f and cp < 0xa0)) return false;
-    return if (self.acceptScalar) |accept| accept(self.userdata, cp) else true;
+    return if (accept) |policy| policy(userdata, cp) else true;
 }
 
 // Preserve the scalar-width gate: a zero-width scalar must join its preceding
@@ -183,15 +187,64 @@ fn renderable(prefix: []const u8, scalar: []const u8, cp: u21) bool {
 
 fn validate(self: *const TextArea, bytes: []const u8) ?Failure {
     if (!std.unicode.utf8ValidateSlice(bytes)) return .invalid_utf8;
-    var at: usize = 0;
-    while (at < bytes.len) {
-        const n = std.unicode.utf8ByteSequenceLength(bytes[at]) catch unreachable;
-        const cp = std.unicode.utf8Decode(bytes[at..][0..n]) catch unreachable;
-        if (!self.validScalar(cp)) return .invalid_scalar;
-        if (!renderable(bytes[0..at], bytes[at..][0..n], cp)) return .unrenderable;
-        at += n;
+    var check = self.textCheck();
+    check.feed(bytes);
+    return check.finish();
+}
+
+/// `setText`'s validation of text held elsewhere, fed in pieces of any size:
+/// whether this editor, with its `acceptScalar`, would take the text, without
+/// storage for it. Capacity and caret are the caller's. `setText` uses it.
+pub const TextCheck = struct {
+    acceptScalar: ?*const fn (?*anyopaque, u21) bool = null,
+    userdata: ?*anyopaque = null,
+    /// The last whole scalar, which decides whether the next renders.
+    prior: [4]u8 = undefined,
+    prior_length: u3 = 0,
+    partial: [4]u8 = undefined,
+    partial_length: u3 = 0,
+    partial_need: u3 = 0,
+    failure: ?Failure = null,
+
+    pub fn feed(self: *TextCheck, bytes: []const u8) void {
+        for (bytes) |byte| {
+            if (self.failure != null) return;
+            if (self.partial_length == 0) self.partial_need = std.unicode.utf8ByteSequenceLength(byte) catch {
+                self.failure = .invalid_utf8;
+                return;
+            };
+            self.partial[self.partial_length] = byte;
+            self.partial_length += 1;
+            if (self.partial_length != self.partial_need) continue;
+            const scalar = self.partial[0..self.partial_length];
+            self.partial_length = 0;
+            const cp = std.unicode.utf8Decode(scalar) catch {
+                self.failure = .invalid_utf8;
+                return;
+            };
+            if (!acceptedScalar(self.acceptScalar, self.userdata, cp)) {
+                self.failure = .invalid_scalar;
+                return;
+            }
+            if (!renderable(self.prior[0..self.prior_length], scalar, cp)) {
+                self.failure = .unrenderable;
+                return;
+            }
+            @memcpy(self.prior[0..scalar.len], scalar);
+            self.prior_length = @intCast(scalar.len);
+        }
     }
-    return null;
+
+    /// The first failure, or null when the whole text would be taken. An
+    /// incomplete trailing scalar is invalid UTF-8.
+    pub fn finish(self: *const TextCheck) ?Failure {
+        if (self.failure) |failure| return failure;
+        return if (self.partial_length != 0) .invalid_utf8 else null;
+    }
+};
+
+pub fn textCheck(self: *const TextArea) TextCheck {
+    return .{ .acceptScalar = self.acceptScalar, .userdata = self.userdata };
 }
 
 /// Atomic restore. Validates size, complete UTF-8 and grapheme-aligned caret
