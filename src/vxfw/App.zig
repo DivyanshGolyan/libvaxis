@@ -635,6 +635,67 @@ const FocusHandler = struct {
     }
 };
 
+test "TextArea render releases cells while focus metadata and editor storage survive" {
+    // Upstream has a single frame arena. This additionally exercises the real
+    // release path when built with a separate cell arena, without requiring it.
+    if (@hasField(vxfw.DrawContext, "cell_arena")) {
+        const testing = std.testing;
+        const Root = struct {
+            area: *vxfw.TextArea,
+
+            fn widget(self: *@This()) Widget {
+                return .{ .userdata = self, .drawFn = draw };
+            }
+
+            fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surface {
+                const self: *@This() = @ptrCast(@alignCast(raw));
+                const children = try ctx.arena.alloc(vxfw.SubSurface, 1);
+                children[0] = .{
+                    .origin = .{ .row = 1, .col = 1 },
+                    .surface = try self.area.draw(ctx.withConstraints(.{}, .{ .width = 3, .height = 2 })),
+                };
+                return .{ .size = ctx.max.size(), .widget = self.widget(), .buffer = &.{}, .children = children };
+            }
+        };
+        var env = try testing.environ.createMap(testing.allocator);
+        defer env.deinit();
+        var tty_buffer: [128]u8 = undefined;
+        var app = try App.init(testing.io, testing.allocator, &env, &tty_buffer);
+        defer app.deinit();
+        try app.vx.resize(testing.allocator, app.tty.writer(), .{ .cols = 5, .rows = 4, .x_pixel = 50, .y_pixel = 40 });
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var cells = std.heap.ArenaAllocator.init(testing.allocator);
+        defer cells.deinit();
+        var storage: [80]u8 = undefined;
+        var area = vxfw.TextArea.init(&storage);
+        _ = area.setText("abc", 3);
+        var root: Root = .{ .area = &area };
+        var ctx: vxfw.EventContext = .{ .io = testing.io, .alloc = testing.allocator, .cmds = .empty };
+        defer ctx.cmds.deinit(testing.allocator);
+        for (0..2) |frame| {
+            try testing.expectEqual(@as(usize, 0), cells.queryCapacity());
+            _ = arena.reset(.free_all);
+            const surface = try app.doLayout(root.widget(), &arena, &cells);
+            try testing.expect(cells.queryCapacity() > 0);
+            var focus = FocusHandler.init(testing.allocator, root.widget());
+            defer focus.deinit(testing.allocator);
+            focus.focused_widget = area.widget();
+            try focus.update(testing.allocator, surface);
+            const view = area.viewport();
+            try app.render(surface, focus.focused_widget, &cells);
+            try testing.expectEqual(@as(usize, 0), cells.queryCapacity());
+            try testing.expect(arena.queryCapacity() > 0);
+            try testing.expectEqualStrings("a", app.vx.screen.readCell(1, 1).?.char.grapheme);
+            try testing.expectEqualDeep(view, area.viewport());
+            // Event dispatch uses the surviving surface tree, not released cells.
+            ctx.consume_event = false;
+            try focus.handleEvent(&ctx, .{ .key_press = .{ .codepoint = 'x', .text = "x" } });
+            try testing.expectEqualStrings(if (frame == 0) "abcx" else "abcxx", area.text());
+        }
+    }
+}
+
 test "a focus request made while handling focus_in is applied" {
     const testing = std.testing;
     const Node = struct {

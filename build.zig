@@ -127,6 +127,7 @@ pub fn build(b: *std.Build) void {
         scroll,
         split_view,
         table,
+        text_area,
         text_input,
         text_view,
         list_view,
