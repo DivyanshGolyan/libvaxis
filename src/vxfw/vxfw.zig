@@ -25,6 +25,7 @@ pub const SizedBox = @import("SizedBox.zig");
 pub const SplitView = @import("SplitView.zig");
 pub const Spinner = @import("Spinner.zig");
 pub const Text = @import("Text.zig");
+pub const TextArea = @import("TextArea.zig");
 pub const TextField = @import("TextField.zig");
 
 pub const CommandList = std.ArrayList(Command);

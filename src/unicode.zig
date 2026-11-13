@@ -1,6 +1,13 @@
 const std = @import("std");
 const uucode = @import("uucode");
 
+/// Unicode general category of a scalar, using the same data as segmentation.
+pub const GeneralCategory = uucode.types.GeneralCategory;
+
+pub fn generalCategory(cp: u21) GeneralCategory {
+    return uucode.get(.general_category, cp);
+}
+
 // Old API-compatible Grapheme value
 pub const Grapheme = struct {
     start: usize,
@@ -49,4 +56,11 @@ test "grapheme iterator: invalid utf8 + combining mark" {
     it = graphemeIterator("\xff\xcc\x81");
     try std.testing.expectEqual(Grapheme{ .start = 0, .len = 3 }, it.next().?);
     try std.testing.expectEqual(null, it.next());
+}
+
+test "general category exposes letters numbers separators and format scalars" {
+    try std.testing.expectEqual(GeneralCategory.letter_lowercase, generalCategory('é'));
+    try std.testing.expectEqual(GeneralCategory.number_decimal_digit, generalCategory('٣'));
+    try std.testing.expectEqual(GeneralCategory.separator_space, generalCategory(0x3000));
+    try std.testing.expectEqual(GeneralCategory.other_format, generalCategory(0x200d));
 }
