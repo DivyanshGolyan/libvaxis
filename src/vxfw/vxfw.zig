@@ -190,9 +190,13 @@ pub const EventContext = struct {
 };
 
 pub const DrawContext = struct {
-    // Allocator backed by an arena. Widgets do not need to free their own resources, they will be
-    // freed after rendering
+    /// Frame arena for widget state, text, children and other metadata. It stays
+    /// alive until the next frame so mouse and focus dispatch can use the tree.
     arena: std.mem.Allocator,
+    /// Arena for surface cell buffers only. App frees it immediately after
+    /// rendering the frame: a Surface.buffer is invalid after rendering. Do
+    /// not allocate widget state or data referenced by cells here.
+    cell_arena: std.mem.Allocator,
     // Constraints
     min: Size,
     max: MaxSize,
@@ -221,6 +225,7 @@ pub const DrawContext = struct {
     pub fn withConstraints(self: DrawContext, min: Size, max: MaxSize) DrawContext {
         return .{
             .arena = self.arena,
+            .cell_arena = self.cell_arena,
             .min = min,
             .max = max,
             .cell_size = self.cell_size,
@@ -344,7 +349,10 @@ pub const Surface = struct {
     /// Cursor state
     cursor: ?CursorState = null,
 
-    /// Contents of this surface. Must be len == 0 or  len == size.width * size.height
+    /// Contents of this surface. Must be len == 0 or len == size.width * size.height.
+    /// Invalid after the frame is rendered. App releases buffers allocated with
+    /// DrawContext.cell_arena then; sizes, children, origins and widgets remain
+    /// available for event dispatch until the next frame.
     buffer: []vaxis.Cell,
 
     children: []SubSurface,
@@ -358,7 +366,9 @@ pub const Surface = struct {
         };
     }
 
-    /// Creates a slice of vaxis.Cell's equal to size.width * size.height
+    /// Creates a slice of vaxis.Cell's equal to size.width * size.height.
+    /// Pass DrawContext.cell_arena for early release after rendering. Passing
+    /// the general frame arena still works, but retains cells until next frame.
     pub fn createBuffer(allocator: Allocator, size: Size) Allocator.Error![]vaxis.Cell {
         const buffer = try allocator.alloc(vaxis.Cell, size.width * size.height);
         @memset(buffer, .{ .default = true });
@@ -586,4 +596,25 @@ test "All widgets have a doctest and refAllDecls test" {
             return error.TestExpectedRefAllDecls;
         }
     }
+}
+
+test "DrawContext preserves the separate cell allocator with constraints" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cells: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer cells.deinit();
+    const ctx: DrawContext = .{
+        .arena = arena.allocator(),
+        .cell_arena = cells.allocator(),
+        .min = .{},
+        .max = .{ .width = 2, .height = 1 },
+        .cell_size = .{ .width = 10, .height = 20 },
+    };
+    const child = ctx.withConstraints(.{}, .{ .width = 1, .height = 1 });
+    try std.testing.expectEqual(ctx.cell_arena.ptr, child.cell_arena.ptr);
+    try std.testing.expectEqual(ctx.cell_arena.vtable, child.cell_arena.vtable);
+    const text: Text = .{ .text = "x" };
+    _ = try text.widget().draw(child);
+    try std.testing.expect(cells.queryCapacity() > 0);
+    try std.testing.expectEqual(@as(usize, 0), arena.queryCapacity());
 }

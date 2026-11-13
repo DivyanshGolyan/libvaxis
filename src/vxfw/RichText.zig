@@ -42,7 +42,7 @@ pub fn draw(self: *const RichText, ctx: vxfw.DrawContext) Allocator.Error!vxfw.S
 
     // Create a surface of target width and max height. We'll trim the result after drawing
     const surface = try vxfw.Surface.init(
-        ctx.arena,
+        ctx.cell_arena,
         self.widget(),
         container_size,
     );
@@ -160,7 +160,7 @@ pub const SoftwrapIterator = struct {
         for (spans) |span| {
             len += span.text.len;
         }
-        var arena = std.heap.ArenaAllocator.init(ctx.arena);
+        var arena = std.heap.ArenaAllocator.init(ctx.cell_arena);
         const alloc = arena.allocator();
         var list: std.ArrayList(vaxis.Cell) = try .initCapacity(alloc, len);
 
@@ -370,6 +370,7 @@ test RichText {
     // These values are asserted in draw
     const ctx: vxfw.DrawContext = .{
         .arena = arena.allocator(),
+        .cell_arena = arena.allocator(),
         .min = .{},
         .max = .{ .width = 7, .height = 2 },
         .cell_size = .{ .width = 10, .height = 20 },
@@ -410,6 +411,7 @@ test "long word wrapping" {
 
     const ctx: vxfw.DrawContext = .{
         .arena = arena.allocator(),
+        .cell_arena = arena.allocator(),
         .min = .{},
         .max = .{ .width = width, .height = null },
         .cell_size = .{ .width = 10, .height = 20 },

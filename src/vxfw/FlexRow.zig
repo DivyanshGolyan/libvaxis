@@ -24,17 +24,19 @@ fn typeErasedDrawFn(ptr: *anyopaque, ctx: vxfw.DrawContext) Allocator.Error!vxfw
 pub fn draw(self: *const FlexRow, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surface {
     std.debug.assert(ctx.max.height != null);
     std.debug.assert(ctx.max.width != null);
-    if (self.children.len == 0) return vxfw.Surface.init(ctx.arena, self.widget(), ctx.min);
+    if (self.children.len == 0) return vxfw.Surface.init(ctx.cell_arena, self.widget(), ctx.min);
 
     // Store the inherent size of each widget
     const size_list = try ctx.arena.alloc(u16, self.children.len);
 
     var layout_arena = std.heap.ArenaAllocator.init(ctx.arena);
+    var layout_cells = std.heap.ArenaAllocator.init(ctx.cell_arena);
 
     const layout_ctx: vxfw.DrawContext = .{
         .min = .{ .width = 0, .height = 0 },
         .max = .{ .width = null, .height = ctx.max.height },
         .arena = layout_arena.allocator(),
+        .cell_arena = layout_cells.allocator(),
         .cell_size = ctx.cell_size,
     };
 
@@ -51,6 +53,7 @@ pub fn draw(self: *const FlexRow, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Su
 
     // We are done with the layout arena
     layout_arena.deinit();
+    layout_cells.deinit();
 
     // make our children list
     var children: std.ArrayList(vxfw.SubSurface) = .empty;
@@ -119,6 +122,7 @@ test FlexRow {
     const flex_widget = flex_row.widget();
     const ctx: vxfw.DrawContext = .{
         .arena = arena.allocator(),
+        .cell_arena = arena.allocator(),
         .min = .{},
         .max = .{ .width = 16, .height = 16 },
         .cell_size = .{ .width = 10, .height = 20 },

@@ -135,7 +135,7 @@ fn typeErasedDrawFn(ptr: *anyopaque, ctx: vxfw.DrawContext) Allocator.Error!vxfw
                 });
             }
             var surface = try vxfw.Surface.initWithChildren(
-                ctx.arena,
+                ctx.cell_arena,
                 self.widget(),
                 max,
                 children.items,
@@ -166,7 +166,7 @@ fn typeErasedDrawFn(ptr: *anyopaque, ctx: vxfw.DrawContext) Allocator.Error!vxfw
                 });
             }
             var surface = try vxfw.Surface.initWithChildren(
-                ctx.arena,
+                ctx.cell_arena,
                 self.widget(),
                 max,
                 children.items,
@@ -190,6 +190,7 @@ test SplitView {
 
     const draw_ctx: vxfw.DrawContext = .{
         .arena = arena.allocator(),
+        .cell_arena = arena.allocator(),
         .min = .{},
         .max = .{ .width = 16, .height = 16 },
         .cell_size = .{ .width = 10, .height = 20 },

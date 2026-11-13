@@ -462,7 +462,7 @@ fn drawBuilder(self: *ScrollView, ctx: vxfw.DrawContext, builder: Builder) Alloc
             .z_index = 0,
         };
         const cursor_surf = try vxfw.Surface.initWithChildren(
-            ctx.arena,
+            ctx.cell_arena,
             self.widget(),
             .{ .width = child_offset, .height = child.surface.size.height },
             sub,
@@ -614,6 +614,7 @@ test ScrollView {
     const scroll_widget = scroll_view.widget();
     const draw_ctx: vxfw.DrawContext = .{
         .arena = arena.allocator(),
+        .cell_arena = arena.allocator(),
         .min = .{},
         .max = .{ .width = 3, .height = 4 },
         .cell_size = .{ .width = 10, .height = 20 },
@@ -1027,6 +1028,7 @@ test "ScrollView: uneven scroll" {
     const scroll_widget = scroll_view.widget();
     const draw_ctx: vxfw.DrawContext = .{
         .arena = arena.allocator(),
+        .cell_arena = arena.allocator(),
         .min = .{},
         .max = .{ .width = 16, .height = 4 },
         .cell_size = .{ .width = 10, .height = 20 },

@@ -208,7 +208,7 @@ pub fn draw(self: *TextField, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surfac
     }
     // Create a surface with max width and a minimum height of 1.
     var surface = try vxfw.Surface.init(
-        ctx.arena,
+        ctx.cell_arena,
         self.widget(),
         .{ .width = max_width, .height = @max(ctx.min.height, 1) },
     );
@@ -678,6 +678,7 @@ test TextField {
     // Text field expands to the width, so it can't be null. It is always 1 line tall
     const draw_ctx: vxfw.DrawContext = .{
         .arena = arena.allocator(),
+        .cell_arena = arena.allocator(),
         .min = .{},
         .max = .{ .width = 8, .height = 1 },
         .cell_size = .{ .width = 10, .height = 20 },
