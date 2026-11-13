@@ -28,6 +28,10 @@ view: View = .{},
 settled: usize = 0,
 
 style: vaxis.Style = .{},
+/// How cells are measured for wrapping, the caret and drawing. Null follows
+/// `vxfw.DrawContext.width_method`; a parent that measures its own cells with
+/// a method of its own sets the same one here.
+width_method: ?vaxis.gwidth.Method = null,
 bindings: Bindings = .default,
 show_cursor: bool = true,
 userdata: ?*anyopaque = null,
@@ -642,9 +646,15 @@ fn drawAdapter(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!v
     return self.draw(ctx);
 }
 
+/// A grapheme's cells by the editor's width method, else the frame's.
+fn cellWidth(method: ?vaxis.gwidth.Method, ctx: vxfw.DrawContext, bytes: []const u8) usize {
+    return if (method) |chosen| vaxis.gwidth.gwidth(bytes, chosen) else ctx.stringWidth(bytes);
+}
+
 const Pieces = struct {
     bytes: []const u8,
     ctx: vxfw.DrawContext,
+    method: ?vaxis.gwidth.Method,
     iterator: ?unicode.GraphemeIterator = null,
 
     pub fn next(self: *Pieces) ?layout.Piece {
@@ -653,7 +663,7 @@ const Pieces = struct {
         const bytes = g.bytes(self.bytes);
         const tab = std.mem.eql(u8, bytes, "\t");
         const kind = if (tab) .space else layout.kindOf(bytes);
-        return .{ .len = g.len, .cells = if (kind == .newline) 0 else if (tab) 1 else @intCast(@min(self.ctx.stringWidth(bytes), std.math.maxInt(u16))), .kind = kind };
+        return .{ .len = g.len, .cells = if (kind == .newline) 0 else if (tab) 1 else @intCast(@min(cellWidth(self.method, self.ctx, bytes), std.math.maxInt(u16))), .kind = kind };
     }
 };
 
@@ -669,7 +679,8 @@ pub fn draw(self: *TextArea, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw
         self.view = .{};
         return vxfw.Surface.init(cells, self.widget(), .{});
     }
-    const pieces: Pieces = .{ .bytes = self.text(), .ctx = ctx };
+    // One width for layout, the caret and the cells.
+    const pieces: Pieces = .{ .bytes = self.text(), .ctx = ctx, .method = self.width_method };
     const shape = layout.shape(pieces, width, self.cursor, self.anchor);
     const lines = try ctx.arena.alloc(layout.Line, @min(shape.lines, height));
     const shown = layout.fit(pieces, width, self.cursor, shape, height, lines);
@@ -686,7 +697,7 @@ pub fn draw(self: *TextArea, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw
         while (it.next()) |g| {
             const bytes = g.bytes(self.buffer[line.start..line.end]);
             const tab = std.mem.eql(u8, bytes, "\t");
-            const w = if (tab) 1 else ctx.stringWidth(bytes);
+            const w = if (tab) 1 else cellWidth(self.width_method, ctx, bytes);
             if (col + w > width) break;
             if (w != 0) surface.writeCell(@intCast(col), @intCast(row), .{
                 .char = .{ .grapheme = if (tab) " " else bytes, .width = @intCast(w) },
