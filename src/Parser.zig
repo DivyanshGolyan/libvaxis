@@ -237,6 +237,13 @@ pub fn parse(self: *Parser, input: []const u8, paste_allocator: ?std.mem.Allocat
             }
             return osc.read(input);
         }
+        // An interrupted 5522 prefix has not opened a frame. Preserve a
+        // following control key instead of waiting indefinitely for OSC ST.
+        for (input[0..@min(input.len, Osc5522.prefix.len)], 0..) |byte, i| {
+            if (i >= 2 and byte < 0x20 and byte != 0x07 and byte != 0x1b and
+                std.mem.startsWith(u8, Osc5522.prefix, input[0..i]))
+                return .{ .event = null, .n = i };
+        }
         if (std.mem.startsWith(u8, input, Osc5522.prefix)) {
             osc.len = 0;
             var result = osc.read(input[Osc5522.prefix.len..]);
@@ -256,7 +263,7 @@ fn parseNormal(self: *Parser, input: []const u8, paste_allocator: ?std.mem.Alloc
                 // ESC before a CSI or SS3 sequence is its alt prefix (rxvt
                 // sends Alt-Left as ESC ESC [ D). A sequence that is not a
                 // key keeps its meaning.
-                var inner = try self.parse(input[1..], paste_allocator);
+                var inner = try self.parseNormal(input[1..], paste_allocator);
                 if (inner.n == 0) return inner;
                 inner.n += 1;
                 if (inner.event) |*event| switch (event.*) {
@@ -2661,4 +2668,21 @@ test "OSC 5522 preserves backspace and treats BEL as terminator" {
     try testing.expectEqual(@as(?Event, null), tail.event);
     try testing.expect(!osc.inProgress());
     try testing.expectEqual('z', (try parser.parse(input[10..], null)).event.?.key_press.codepoint);
+}
+
+test "OSC 5522 incomplete prefix releases control keys" {
+    for (2..Osc5522.prefix.len) |length| {
+        var osc: Osc5522 = .{};
+        var parser: Parser = .{ .osc_5522 = &osc };
+        var input: [Osc5522.prefix.len + 1]u8 = undefined;
+        @memcpy(input[0..length], Osc5522.prefix[0..length]);
+        input[length] = 0x03;
+        const skipped = try parser.parse(input[0 .. length + 1], null);
+        try testing.expectEqual(length, skipped.n);
+        try testing.expectEqual(@as(?Event, null), skipped.event);
+        const key = try parser.parse(input[length .. length + 1], null);
+        try testing.expectEqual(@as(u21, 'c'), key.event.?.key_press.codepoint);
+        try testing.expect(key.event.?.key_press.mods.ctrl);
+        try testing.expect(!osc.inProgress());
+    }
 }
