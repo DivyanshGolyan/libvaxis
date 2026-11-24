@@ -204,16 +204,7 @@ pub fn Loop(comptime T: type) type {
                         var seq_start: usize = 0;
                         while (seq_start < n) {
                             if (n - seq_start == 1 and buf[seq_start] == 0x1b and !osc_5522.inProgress()) {
-                                var poll_fds = [1]std.posix.pollfd{.{
-                                    .fd = self.tty.fd.handle,
-                                    .events = std.posix.POLL.IN,
-                                    .revents = 0,
-                                }};
-                                // In report-all mode Escape is encoded as CSI. Allow a
-                                // short read boundary before treating a bare ESC as a key.
-                                const wait_ms: i32 = if (self.disambiguated_input.load(.acquire)) 25 else 0;
-                                _ = std.posix.poll(&poll_fds, wait_ms) catch 0;
-                                if (poll_fds[0].revents & std.posix.POLL.IN != 0) {
+                                if (bufferEscape(self.tty.fd.handle, self.disambiguated_input.load(.acquire), PosixPoll{})) {
                                     buf[0] = buf[seq_start];
                                     read_start = 1;
                                     continue :read_loop;
@@ -253,6 +244,45 @@ pub fn Loop(comptime T: type) type {
             }
         }
     };
+}
+
+const PosixPoll = struct {
+    fn wait(_: PosixPoll, fds: []std.posix.pollfd, timeout: i32) !usize {
+        return std.posix.poll(fds, timeout);
+    }
+};
+
+fn bufferEscape(fd: std.posix.fd_t, disambiguated: bool, poller: anytype) bool {
+    var fds = [1]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 }};
+    // In report-all mode Escape is encoded as CSI. Allow a short read
+    // boundary before treating a bare ESC as a key.
+    const timeout: i32 = if (disambiguated) 25 else 0;
+    _ = poller.wait(&fds, timeout) catch 0;
+    return fds[0].revents & std.posix.POLL.IN != 0;
+}
+
+test "OSC 5522 Escape disambiguation respects its read deadline" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const Poll = struct {
+        arrival_ms: ?i32,
+        fn wait(self: @This(), fds: []std.posix.pollfd, timeout: i32) !usize {
+            if (self.arrival_ms) |arrival| if (arrival <= timeout) {
+                fds[0].revents = std.posix.POLL.IN;
+                return 1;
+            };
+            return 0;
+        }
+    };
+    for ([_]struct { enabled: bool, arrival: ?i32, retain: bool }{
+        .{ .enabled = true, .arrival = 1, .retain = true },
+        .{ .enabled = true, .arrival = 25, .retain = true },
+        .{ .enabled = true, .arrival = 26, .retain = false },
+        .{ .enabled = true, .arrival = null, .retain = false },
+        .{ .enabled = false, .arrival = 0, .retain = true },
+        .{ .enabled = false, .arrival = 1, .retain = false },
+    }) |case| {
+        try std.testing.expectEqual(case.retain, bufferEscape(0, case.enabled, Poll{ .arrival_ms = case.arrival }));
+    }
 }
 
 const ReadRetry = struct {
