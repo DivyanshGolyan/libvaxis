@@ -14,6 +14,9 @@ pub const Event = union(enum) {
     paste_start, // bracketed paste start
     paste_end, // bracketed paste end
     paste: []const u8, // osc 52 paste, caller must free
+    clipboard_protocol: bool, // DEC private mode 5522 report
+    osc_5522: []const u8, // borrows the parser's frame buffer until the next parse
+    osc_5522_invalid,
     color_report: Color.Report, // osc 4, 10, 11, 12 response
     color_scheme: Color.Scheme,
     winsize: Winsize,
