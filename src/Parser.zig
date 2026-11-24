@@ -225,11 +225,10 @@ pub fn parse(self: *Parser, input: []const u8, paste_allocator: ?std.mem.Allocat
                         input[inner + 2] < 0x20)
                         return .{ .event = null, .n = 1 };
                 }
-                if (osc.pasting or route_key) {
+                if (route_key) {
                     const result = try self.parseNormal(input, paste_allocator);
                     if (result.event) |event| switch (event) {
-                        .paste_start => osc.pasting = true,
-                        .paste_end => osc.pasting = false,
+                        .paste_start, .paste_end => return .{ .event = null, .n = result.n },
                         else => {},
                     };
                     return result;
@@ -539,7 +538,6 @@ pub const Osc5522 = struct {
 
     len: ?usize = null,
     draining: bool = false,
-    pasting: bool = false,
     bytes: [max_bytes]u8 = undefined,
 
     pub fn inProgress(self: *const Osc5522) bool {
@@ -2504,18 +2502,29 @@ test "OSC 5522 interruption drains delayed tail and routes kitty keys" {
     try testing.expectEqual('x', (try parser.parse("x", null)).event.?.key_press.codepoint);
 }
 
-test "OSC 5522 interrupted bracketed paste and BEL drain" {
+test "OSC 5522 interrupted bracketed paste cannot release a delayed tail" {
     var osc: Osc5522 = .{};
     var parser: Parser = .{ .osc_5522 = &osc };
-    _ = try parser.parse("\x1b]5522;partial", null);
-    try testing.expectEqual(@as(?Event, .osc_5522_invalid), (try parser.parse("\x1b[200~", null)).event);
-    try testing.expectEqual(@as(?Event, .paste_start), (try parser.parse("\x1b[200~", null)).event);
-    try testing.expectEqual('p', (try parser.parse("paste", null)).event.?.key_press.codepoint);
-    try testing.expectEqual(0, (try parser.parse("\x1b", null)).n);
-    try testing.expectEqual(@as(?Event, .paste_end), (try parser.parse("\x1b[201~", null)).event);
-    const tail = try parser.parse("YWJj\x07z", null);
-    try testing.expectEqual(5, tail.n);
+    _ = try parser.parse("\x1b]5522;status=DATA;SGVs", null);
+    const start = "\x1b[200~";
+    const invalid = try parser.parse(start, null);
+    try testing.expectEqual(@as(?Event, .osc_5522_invalid), invalid.event);
+    try testing.expectEqual(0, invalid.n);
+    const paste_start = try parser.parse(start, null);
+    try testing.expectEqual(@as(?Event, null), paste_start.event);
+    try testing.expectEqual(start.len, paste_start.n);
+    const tail = try parser.parse("bG8=", null);
     try testing.expectEqual(@as(?Event, null), tail.event);
+    try testing.expectEqual(4, tail.n);
+    const finish = "\x1b[201~";
+    const paste_end = try parser.parse(finish, null);
+    try testing.expectEqual(@as(?Event, null), paste_end.event);
+    try testing.expectEqual(finish.len, paste_end.n);
+    try testing.expectEqual(0, (try parser.parse("\x1b", null)).n);
+    const terminator = try parser.parse("\x1b\\z", null);
+    try testing.expectEqual(@as(?Event, null), terminator.event);
+    try testing.expectEqual(2, terminator.n);
+    try testing.expect(!osc.inProgress());
     try testing.expectEqual('z', (try parser.parse("z", null)).event.?.key_press.codepoint);
 }
 
@@ -2685,4 +2694,14 @@ test "OSC 5522 incomplete prefix releases control keys" {
         try testing.expect(key.event.?.key_press.mods.ctrl);
         try testing.expect(!osc.inProgress());
     }
+}
+
+test "OSC 5522 reader preserves ordinary bracketed paste outside a frame" {
+    var osc: Osc5522 = .{};
+    var parser: Parser = .{ .osc_5522 = &osc };
+    try testing.expectEqual(@as(?Event, .paste_start), (try parser.parse("\x1b[200~", null)).event);
+    const text = try parser.parse("hello", null);
+    try testing.expectEqual(@as(u21, 'h'), text.event.?.key_press.codepoint);
+    try testing.expectEqual(@as(?Event, .paste_end), (try parser.parse("\x1b[201~", null)).event);
+    try testing.expect(!osc.inProgress());
 }
