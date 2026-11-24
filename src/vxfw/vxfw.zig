@@ -44,6 +44,9 @@ pub const Event = union(enum) {
     paste_start, // bracketed paste start
     paste_end, // bracketed paste end
     paste: []const u8, // osc 52 paste, caller must free
+    clipboard_protocol: bool, // DEC private mode 5522 support
+    osc_5522: []const u8, // raw payload after "5522;", borrowed through event dispatch
+    osc_5522_invalid,
     color_report: vaxis.Color.Report, // osc 4, 10, 11, 12 response
     color_scheme: vaxis.Color.Scheme, // light / dark OS theme changes
     winsize: vaxis.Winsize, // the window size has changed. This event is always sent when the loop is started
@@ -74,6 +77,24 @@ pub const Tick = struct {
     }
 };
 
+pub const ClipboardOutput = struct {
+    pub const max_bytes = 512;
+
+    storage: [max_bytes]u8 = undefined,
+    len: u16,
+
+    pub fn init(payload: []const u8) ClipboardOutput {
+        std.debug.assert(payload.len <= max_bytes);
+        var output: ClipboardOutput = .{ .len = @intCast(payload.len) };
+        @memcpy(output.storage[0..output.len], payload);
+        return output;
+    }
+
+    pub fn bytes(self: *const ClipboardOutput) []const u8 {
+        return self.storage[0..self.len];
+    }
+};
+
 pub const Command = union(enum) {
     /// Callback the event with a tick event at the specified deadlline
     tick: Tick,
@@ -85,6 +106,11 @@ pub const Command = union(enum) {
     /// Try to copy the provided text to the host clipboard. Uses OSC 52. Silently fails if terminal
     /// doesn't support OSC 52
     copy_to_clipboard: []const u8,
+
+    /// Enable or disable DEC private mode 5522 for this App run.
+    clipboard_mode: bool,
+    /// Write and flush framed clipboard protocol bytes.
+    clipboard_output: ClipboardOutput,
 
     /// Set the title of the terminal
     set_title: []const u8,

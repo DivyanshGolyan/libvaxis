@@ -137,8 +137,10 @@ pub const EventType = enum(c_int) {
 };
 
 comptime {
-    // EventType and vaxis.Event must stay in sync in both directions
+    // C-visible events and EventType must stay in sync in both directions.
     for (@typeInfo(vaxis.Event).@"union".field_names) |name| {
+        if (std.mem.eql(u8, name, "clipboard_protocol") or std.mem.eql(u8, name, "osc_5522") or
+            std.mem.eql(u8, name, "osc_5522_invalid")) continue;
         if (!@hasField(EventType, name))
             @compileError("vaxis.Event variant missing from EventType: " ++ name);
     }
@@ -857,7 +859,7 @@ pub fn tty_next_event(tty: ?*CTty, parser: ?*CParser, event: ?*?*const CEvent) c
     clearParserEvent(p);
     const parsed = t.tty.?.nextEvent(&p.parser, p.allocator.get()) catch return .err_io;
     convertEvent(p, parsed);
-    out.* = &p.event;
+    if (p.event.type != .none) out.* = &p.event;
     return .ok;
 }
 pub fn runtime_new(tty: ?*CTty, opts: ?*const CRuntimeOptions, out: ?*?*CRuntime) callconv(.c) Result {
@@ -1196,7 +1198,7 @@ pub fn parser_parse(
     out_consumed.* = result.n;
     if (result.event) |ev| {
         convertEvent(p, ev);
-        out_event.* = &p.event;
+        if (p.event.type != .none) out_event.* = &p.event;
     }
     return .ok;
 }
@@ -1366,9 +1368,10 @@ pub fn version() callconv(.c) [*:0]const u8 {
 }
 
 fn convertEvent(p: *CParser, event: vaxis.Event) void {
-    // the tag mapping is comptime-checked: a vaxis.Event variant without a
-    // matching EventType tag fails to compile
+    // Internal clipboard events are not part of the C parser contract.
+    // Every other variant is checked against EventType at comptime.
     p.event.type = switch (event) {
+        .clipboard_protocol, .osc_5522, .osc_5522_invalid => .none,
         inline else => |_, tag| @field(EventType, @tagName(tag)),
     };
     switch (event) {
@@ -1881,4 +1884,25 @@ test "c api: xtversion event without an allocator" {
     try testing.expectEqual(EventType.terminal_version, event_get_type(event));
     // Copied into the parser, because the parsed slice only borrows its input.
     try testing.expectEqualStrings("kitty(0.42.2)", event.?.terminal_version);
+}
+
+test "c api: ignores internal clipboard protocol events" {
+    const parser = parser_new() orelse return error.OutOfMemory;
+    defer parser_free(parser);
+    var event: ?*const CEvent = null;
+    var consumed: usize = 0;
+    const report = "\x1b[?5522;2$y";
+    try testing.expectEqual(Result.ok, parseBytes(parser, report, &event, &consumed));
+    try testing.expectEqual(report.len, consumed);
+    try testing.expectEqual(@as(?*const CEvent, null), event);
+    try testing.expectEqual(Result.ok, parseBytes(parser, "x", &event, &consumed));
+    try testing.expectEqual(@as(usize, 1), consumed);
+    try testing.expectEqual(EventType.key_press, event_get_type(event));
+    const borrowed = try testing.allocator.dupe(u8, "synthetic");
+    defer testing.allocator.free(borrowed);
+    convertEvent(parser, .{ .osc_5522 = borrowed });
+    try testing.expectEqual(EventType.none, parser.event.type);
+    try testing.expectEqualStrings("synthetic", borrowed);
+    convertEvent(parser, .osc_5522_invalid);
+    try testing.expectEqual(EventType.none, parser.event.type);
 }

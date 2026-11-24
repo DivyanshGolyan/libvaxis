@@ -17,6 +17,7 @@ tty: vaxis.Tty,
 vx: vaxis.Vaxis,
 timers: std.ArrayList(vxfw.Tick),
 wants_focus: ?vxfw.Widget,
+clipboard_mode: bool = false,
 
 /// Runtime options
 pub const Options = struct {
@@ -57,7 +58,14 @@ pub fn run(self: *App, widget: vxfw.Widget, opts: Options) anyerror!void {
 
     var loop: EventLoop = .init(self.io, tty, vx);
     try loop.start();
-    defer loop.stop();
+    defer {
+        self.setClipboardMode(false) catch {};
+        loop.stop();
+        while (loop.tryEvent() catch null) |event| switch (event) {
+            .osc_5522, .paste => |payload| self.allocator.free(payload),
+            else => {},
+        };
+    }
 
     // Send the init event
     try loop.postEvent(.init);
@@ -66,6 +74,8 @@ pub fn run(self: *App, widget: vxfw.Widget, opts: Options) anyerror!void {
 
     try vx.enterAltScreen(tty.writer());
     try vx.queryTerminal(tty.writer(), .fromSeconds(1));
+    if (vx.state.kitty_keyboard and vx.opts.kitty_keyboard_flags.disambiguate and vx.opts.kitty_keyboard_flags.report_all_as_ctl_seqs) loop.setDisambiguatedInput();
+    if (@import("builtin").os.tag != .windows) try self.clipboardOutput("\x1b[?5522$p");
     try vx.setBracketedPaste(tty.writer(), true);
     try vx.subscribeToColorSchemeUpdates(tty.writer());
 
@@ -207,6 +217,12 @@ fn dispatchEvents(
                 try self.handleCommand(&ctx.cmds);
             },
             .mouse => |mouse| try mouse_handler.handleMouse(self, ctx, mouse),
+            .clipboard_protocol, .osc_5522, .osc_5522_invalid => {
+                defer if (event == .osc_5522) self.allocator.free(event.osc_5522);
+                ctx.phase = .at_target;
+                try focus_handler.root.handleEvent(ctx, event);
+                try self.handleCommand(&ctx.cmds);
+            },
             .winsize => |ws| {
                 try self.vx.resize(self.allocator, self.tty.writer(), ws);
                 ctx.redraw = true;
@@ -275,15 +291,38 @@ fn addTick(self: *App, tick: vxfw.Tick) Allocator.Error!void {
     std.sort.insertion(vxfw.Tick, self.timers.items, {}, vxfw.Tick.lessThan);
 }
 
-fn handleCommand(self: *App, cmds: *vxfw.CommandList) Allocator.Error!void {
-    defer cmds.clearRetainingCapacity();
+fn setClipboardMode(self: *App, enabled: bool) std.Io.Writer.Error!void {
+    if (self.clipboard_mode == enabled) return;
+    // Reset on exit even if enabling failed after a partial TTY write.
+    if (enabled) self.clipboard_mode = true;
+    try self.clipboardOutput(if (enabled) "\x1b[?5522h" else "\x1b[?5522l");
+    self.clipboard_mode = enabled;
+}
+
+fn clipboardOutput(self: *App, bytes: []const u8) std.Io.Writer.Error!void {
+    const writer = self.tty.writer();
+    try writer.writeAll(bytes);
+    try writer.flush();
+}
+
+fn handleCommand(self: *App, cmds: *vxfw.CommandList) (Allocator.Error || std.Io.Writer.Error)!void {
+    defer {
+        for (cmds.items) |cmd| switch (cmd) {
+            .copy_to_clipboard, .set_title => |content| self.allocator.free(content),
+            .notify => |notification| {
+                if (notification.title) |title| self.allocator.free(title);
+                self.allocator.free(notification.body);
+            },
+            else => {},
+        };
+        cmds.clearRetainingCapacity();
+    }
     for (cmds.items) |cmd| {
         switch (cmd) {
             .tick => |tick| try self.addTick(tick),
             .set_mouse_shape => |shape| self.vx.setMouseShape(shape),
             .request_focus => |widget| self.wants_focus = widget,
             .copy_to_clipboard => |content| {
-                defer self.allocator.free(content);
                 self.vx.copyToSystemClipboard(self.tty.writer(), content, self.allocator) catch |err| {
                     switch (err) {
                         error.OutOfMemory => return Allocator.Error.OutOfMemory,
@@ -291,8 +330,9 @@ fn handleCommand(self: *App, cmds: *vxfw.CommandList) Allocator.Error!void {
                     }
                 };
             },
+            .clipboard_mode => |enabled| try self.setClipboardMode(enabled),
+            .clipboard_output => |output| try self.clipboardOutput(output.bytes()),
             .set_title => |title| {
-                defer self.allocator.free(title);
                 self.vx.setTitle(self.tty.writer(), title) catch |err| {
                     std.log.err("set_title error: {}", .{err});
                 };
@@ -302,11 +342,6 @@ fn handleCommand(self: *App, cmds: *vxfw.CommandList) Allocator.Error!void {
                 self.vx.notify(self.tty.writer(), notification.title, notification.body) catch |err| {
                     std.log.err("notify error: {}", .{err});
                 };
-                const alloc = self.allocator;
-                if (notification.title) |title| {
-                    alloc.free(title);
-                }
-                alloc.free(notification.body);
             },
             .query_color => |kind| {
                 self.vx.queryColor(self.tty.writer(), kind) catch |err| {
@@ -1260,4 +1295,59 @@ test "render frees cell buffers between frames and preserves mouse and focus dis
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+test "SUI-128 OSC 5522 transport dispatches copied frames and reports only to the App root" {
+    const testing = std.testing;
+    const Observe = struct {
+        capability: ?bool = null,
+        frames: usize = 0,
+
+        fn root(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            try testing.expectEqual(vxfw.EventContext.Phase.at_target, ctx.phase);
+            switch (event) {
+                .clipboard_protocol => |supported| self.capability = supported,
+                .osc_5522 => |payload| {
+                    const expected = [_][]const u8{ "first", "second" };
+                    try testing.expectEqualStrings(expected[self.frames], payload);
+                    self.frames += 1;
+                },
+                else => return error.UnexpectedEvent,
+            }
+        }
+
+        fn child(_: *anyopaque, _: *vxfw.EventContext, _: vxfw.Event) !void {
+            return error.UnexpectedChildEvent;
+        }
+
+        fn draw(_: *anyopaque, _: vxfw.DrawContext) Allocator.Error!vxfw.Surface {
+            unreachable;
+        }
+    };
+    var observed: Observe = .{};
+    const root: Widget = .{ .userdata = &observed, .eventHandler = Observe.root, .drawFn = Observe.draw };
+    var child_data: u8 = 0;
+    const child: Widget = .{ .userdata = &child_data, .eventHandler = Observe.child, .drawFn = Observe.draw };
+    var mouse = MouseHandler.init(root);
+    defer mouse.deinit(testing.allocator);
+    var focus = FocusHandler.init(testing.allocator, root);
+    defer focus.deinit(testing.allocator);
+    focus.focused_widget = child;
+    try focus.path_to_focused.appendSlice(testing.allocator, &.{ root, child });
+    var ctx: vxfw.EventContext = .{ .io = testing.io, .alloc = testing.allocator, .cmds = .empty };
+    defer ctx.cmds.deinit(testing.allocator);
+
+    var app: App = .{ .io = testing.io, .allocator = testing.allocator, .tty = undefined, .vx = undefined, .timers = .empty, .wants_focus = null };
+    var loop: EventLoop = .init(testing.io, &app.tty, &app.vx);
+    var osc: vaxis.Parser.Osc5522 = .{};
+    var parser: vaxis.Parser = .{ .osc_5522 = &osc };
+    var cache: vaxis.GraphemeCache = .{};
+    for ([_][]const u8{ "\x1b[?5522;2$y", "\x1b]5522;first\x07", "\x1b]5522;second\x07" }) |input| {
+        const event = (try parser.parse(input, null)).event.?;
+        try vaxis.loop.handleEventGeneric(&loop, &app.vx, &cache, vxfw.Event, event, testing.allocator);
+    }
+    try app.dispatchEvents(&loop, &ctx, &mouse, &focus);
+    try testing.expectEqual(@as(?bool, true), observed.capability);
+    try testing.expectEqual(2, observed.frames);
 }

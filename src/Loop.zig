@@ -25,6 +25,7 @@ pub fn Loop(comptime T: type) type {
         // Queued key text must outlive the input task, including on failure.
         cache: GraphemeCache = .{},
         resize_handler_installed: bool = false,
+        disambiguated_input: std.atomic.Value(bool) = .init(false),
 
         /// Initialize the event loop. This is an intrusive init so that we have
         /// a stable pointer to register signal callbacks with posix TTYs
@@ -35,6 +36,11 @@ pub fn Loop(comptime T: type) type {
                 .vaxis = vx,
                 .queue = .init(io),
             };
+        }
+
+        /// Publish only after a terminal has accepted the all-keys keyboard mode.
+        pub fn setDisambiguatedInput(self: *Self) void {
+            self.disambiguated_input.store(true, .release);
         }
 
         pub fn installResizeHandler(self: *Self) !void {
@@ -172,6 +178,9 @@ pub fn Loop(comptime T: type) type {
             switch (builtin.os.tag) {
                 .windows => try self.runWindows(self.tty, paste_allocator),
                 else => {
+                    var osc_5522: Parser.Osc5522 = .{};
+                    if (@hasField(Event, "osc_5522")) parser.osc_5522 = &osc_5522;
+
                     // get our initial winsize
                     const winsize = try self.tty.getWinsize();
                     if (@hasField(Event, "winsize")) {
@@ -194,15 +203,8 @@ pub fn Loop(comptime T: type) type {
                         const n = read_start + bytes_read;
                         var seq_start: usize = 0;
                         while (seq_start < n) {
-                            if (n - seq_start == 1 and buf[seq_start] == 0x1b) {
-                                // Preserve ESC only when continuation bytes are already queued.
-                                var poll_fds = [1]std.posix.pollfd{.{
-                                    .fd = self.tty.fd.handle,
-                                    .events = std.posix.POLL.IN,
-                                    .revents = 0,
-                                }};
-                                _ = std.posix.poll(&poll_fds, 0) catch 0;
-                                if (poll_fds[0].revents & std.posix.POLL.IN != 0) {
+                            if (n - seq_start == 1 and buf[seq_start] == 0x1b and !osc_5522.inProgress()) {
+                                if (bufferEscape(self.tty.fd.handle, self.disambiguated_input.load(.acquire), PosixPoll{})) {
                                     buf[0] = buf[seq_start];
                                     read_start = 1;
                                     continue :read_loop;
@@ -216,6 +218,11 @@ pub fn Loop(comptime T: type) type {
                                 read_start = 0;
                                 continue :read_loop;
                             };
+                            if (result.n == 0 and result.event != null and result.event.? == .osc_5522_invalid) {
+                                // The next escape unframed the OSC and still belongs to the decoder.
+                                try handleEventGeneric(self, self.vaxis, &self.cache, Event, .osc_5522_invalid, paste_allocator);
+                                continue;
+                            }
                             if (result.n == 0) {
                                 // copy the read to the beginning. We don't use memcpy because
                                 // this could be overlapping, and it's also rare
@@ -237,6 +244,45 @@ pub fn Loop(comptime T: type) type {
             }
         }
     };
+}
+
+const PosixPoll = struct {
+    fn wait(_: PosixPoll, fds: []std.posix.pollfd, timeout: i32) !usize {
+        return std.posix.poll(fds, timeout);
+    }
+};
+
+fn bufferEscape(fd: std.posix.fd_t, disambiguated: bool, poller: anytype) bool {
+    var fds = [1]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 }};
+    // In report-all mode Escape is encoded as CSI. Allow a short read
+    // boundary before treating a bare ESC as a key.
+    const timeout: i32 = if (disambiguated) 25 else 0;
+    _ = poller.wait(&fds, timeout) catch 0;
+    return fds[0].revents & std.posix.POLL.IN != 0;
+}
+
+test "OSC 5522 Escape disambiguation respects its read deadline" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const Poll = struct {
+        arrival_ms: ?i32,
+        fn wait(self: @This(), fds: []std.posix.pollfd, timeout: i32) !usize {
+            if (self.arrival_ms) |arrival| if (arrival <= timeout) {
+                fds[0].revents = std.posix.POLL.IN;
+                return 1;
+            };
+            return 0;
+        }
+    };
+    for ([_]struct { enabled: bool, arrival: ?i32, retain: bool }{
+        .{ .enabled = true, .arrival = 1, .retain = true },
+        .{ .enabled = true, .arrival = 25, .retain = true },
+        .{ .enabled = true, .arrival = 26, .retain = false },
+        .{ .enabled = true, .arrival = null, .retain = false },
+        .{ .enabled = false, .arrival = 0, .retain = true },
+        .{ .enabled = false, .arrival = 1, .retain = false },
+    }) |case| {
+        try std.testing.expectEqual(case.retain, bufferEscape(0, case.enabled, Poll{ .arrival_ms = case.arrival }));
+    }
 }
 
 const ReadRetry = struct {
@@ -299,6 +345,23 @@ pub fn handleEventGeneric(self: anytype, vx: *Vaxis, cache: *GraphemeCache, Even
                 return self.postEvent(.{ .paste = text });
             }
             if (paste_allocator) |allocator| allocator.free(text);
+            return;
+        },
+        .clipboard_protocol => |supported| {
+            if (@hasField(Event, "clipboard_protocol")) return self.postEvent(.{ .clipboard_protocol = supported });
+            return;
+        },
+        .osc_5522_invalid => {
+            if (@hasField(Event, "osc_5522_invalid")) return self.postEvent(.osc_5522_invalid);
+            return;
+        },
+        .osc_5522 => |payload| {
+            if (@hasField(Event, "osc_5522")) {
+                const allocator = paste_allocator orelse return;
+                const owned = try allocator.dupe(u8, payload);
+                errdefer allocator.free(owned);
+                return self.postEvent(.{ .osc_5522 = owned });
+            }
             return;
         },
         .terminal_version => |identity| {
@@ -410,7 +473,7 @@ pub fn handleEventGeneric(self: anytype, vx: *Vaxis, cache: *GraphemeCache, Even
                         return self.postEvent(.{ .color_report = report });
                     }
                 },
-                .cursor_position, .paste_start, .paste_end, .paste, .terminal_version => unreachable, // handled above on all platforms
+                .cursor_position, .paste_start, .paste_end, .paste, .clipboard_protocol, .osc_5522, .osc_5522_invalid, .terminal_version => unreachable, // handled above on all platforms
                 .color_scheme => |scheme| {
                     if (@hasField(Event, "color_scheme")) {
                         return self.postEvent(.{ .color_scheme = scheme });
