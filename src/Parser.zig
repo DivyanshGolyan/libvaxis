@@ -194,6 +194,20 @@ pub fn parse(self: *Parser, input: []const u8, paste_allocator: ?std.mem.Allocat
     if (self.osc_5522) |osc| {
         if (osc.inProgress()) {
             if (osc.draining) {
+                const paste_start = "\x1b[200~";
+                const paste_end = "\x1b[201~";
+                if (input.len < paste_start.len and
+                    (std.mem.startsWith(u8, paste_start, input) or std.mem.startsWith(u8, paste_end, input)))
+                    return .{ .event = null, .n = 0 };
+                if (std.mem.startsWith(u8, input, paste_start)) {
+                    osc.quarantined_paste = true;
+                    return .{ .event = null, .n = paste_start.len };
+                }
+                if (std.mem.startsWith(u8, input, paste_end)) {
+                    osc.quarantined_paste = false;
+                    if (osc.terminated) osc.reset();
+                    return .{ .event = null, .n = paste_end.len };
+                }
                 if (input.len == 1 and input[0] == 0x1b)
                     return .{ .event = null, .n = 0 };
                 // Clipboard metadata and base64 payload do not contain C0
@@ -218,7 +232,13 @@ pub fn parse(self: *Parser, input: []const u8, paste_allocator: ?std.mem.Allocat
                         for (input[inner + 2 ..], inner + 2..) |byte, i| {
                             if (i - inner >= 128 or byte < 0x20 or byte > 0x7e)
                                 return .{ .event = null, .n = 1 };
-                            if (byte >= 0x40) break;
+                            if (byte >= 0x40) {
+                                switch (byte) {
+                                    'u', '~', 'A', 'B', 'C', 'D', 'E', 'F', 'H', 'I', 'O', 'P', 'Q', 'R', 'S' => {},
+                                    else => return .{ .event = null, .n = i + 1 },
+                                }
+                                break;
+                            }
                         }
                     }
                     if (route_key and input[inner + 1] == 'O' and input.len > inner + 2 and
@@ -229,7 +249,17 @@ pub fn parse(self: *Parser, input: []const u8, paste_allocator: ?std.mem.Allocat
                     const result = try self.parseNormal(input, paste_allocator);
                     if (result.event) |event| switch (event) {
                         .paste_start, .paste_end => return .{ .event = null, .n = result.n },
-                        else => {},
+                        .key_press, .key_release => |key| {
+                            if (osc.quarantined_paste) {
+                                const safe = recoveryKey(key) orelse return .{ .event = null, .n = result.n };
+                                const recovered: Event = if (event == .key_press)
+                                    .{ .key_press = safe }
+                                else
+                                    .{ .key_release = safe };
+                                return .{ .event = recovered, .n = result.n };
+                            }
+                        },
+                        else => if (osc.quarantined_paste) return .{ .event = null, .n = result.n },
                     };
                     return result;
                 }
@@ -252,6 +282,22 @@ pub fn parse(self: *Parser, input: []const u8, paste_allocator: ?std.mem.Allocat
     }
 
     return self.parseNormal(input, paste_allocator);
+}
+
+fn recoveryKey(key: Key) ?Key {
+    const navigation = switch (key.codepoint) {
+        Key.escape, Key.left, Key.right, Key.up, Key.down, Key.page_up, Key.page_down, Key.home, Key.end, Key.f1...Key.f35 => true,
+        else => false,
+    };
+    const control = key.mods.ctrl and switch (key.codepoint) {
+        'a', 'c', 'e', 'u', 'w' => true,
+        else => false,
+    };
+    const word = key.mods.alt and (key.codepoint == 'b' or key.codepoint == 'f');
+    if (!navigation and !control and !word) return null;
+    var safe = key;
+    safe.text = null;
+    return safe;
 }
 
 fn parseNormal(self: *Parser, input: []const u8, paste_allocator: ?std.mem.Allocator) !Result {
@@ -538,7 +584,16 @@ pub const Osc5522 = struct {
 
     len: ?usize = null,
     draining: bool = false,
+    quarantined_paste: bool = false,
+    terminated: bool = false,
     bytes: [max_bytes]u8 = undefined,
+
+    fn reset(self: *Osc5522) void {
+        self.len = null;
+        self.draining = false;
+        self.quarantined_paste = false;
+        self.terminated = false;
+    }
 
     pub fn inProgress(self: *const Osc5522) bool {
         return self.len != null;
@@ -580,8 +635,9 @@ pub const Osc5522 = struct {
                     .{ .osc_5522 = self.bytes[0..len] }
                 else
                     .osc_5522_invalid;
-                self.len = null;
-                self.draining = false;
+                if (self.draining and self.quarantined_paste) {
+                    self.terminated = true;
+                } else self.reset();
                 return .{ .event = event, .n = frame.consumed };
             }
             if (!self.draining) {
@@ -2703,5 +2759,111 @@ test "OSC 5522 reader preserves ordinary bracketed paste outside a frame" {
     const text = try parser.parse("hello", null);
     try testing.expectEqual(@as(u21, 'h'), text.event.?.key_press.codepoint);
     try testing.expectEqual(@as(?Event, .paste_end), (try parser.parse("\x1b[201~", null)).event);
+    try testing.expect(!osc.inProgress());
+}
+
+test "OSC 5522 quarantined paste suppresses encoded text and keeps recovery keys" {
+    var osc: Osc5522 = .{};
+    var parser: Parser = .{ .osc_5522 = &osc };
+    _ = try parser.parse("\x1b]5522;partial", null);
+    try testing.expectEqual(@as(?Event, .osc_5522_invalid), (try parser.parse("\x1b[200~", null)).event);
+    try testing.expectEqual(@as(?Event, null), (try parser.parse("\x1b[200~", null)).event);
+    const text = try parser.parse("\x1b[120;1;120u", null);
+    try testing.expectEqual(@as(?Event, null), text.event);
+    try testing.expectEqual("\x1b[120;1;120u".len, text.n);
+    const escape = try parser.parse("\x1b[27u", null);
+    try testing.expectEqual(Key.escape, escape.event.?.key_press.codepoint);
+    const option = try parser.parse("\x1bb", null);
+    try testing.expect(option.event.?.key_press.mods.alt);
+    try testing.expectEqual(@as(u21, 'b'), option.event.?.key_press.codepoint);
+    const function = try parser.parse("\x1bOP", null);
+    try testing.expectEqual(Key.f1, function.event.?.key_press.codepoint);
+    const interrupt = try parser.parse("\x03", null);
+    try testing.expect(interrupt.event.?.key_press.mods.ctrl);
+    try testing.expectEqual(@as(u21, 'c'), interrupt.event.?.key_press.codepoint);
+    try testing.expectEqual(@as(?Event, null), (try parser.parse("\x1b[201~", null)).event);
+    try testing.expectEqual(@as(?Event, null), (try parser.parse("bG8=\x1b\\", null)).event);
+    try testing.expect(!osc.inProgress());
+}
+
+test "OSC 5522 terminator inside quarantined paste waits for paste end" {
+    var osc: Osc5522 = .{};
+    var parser: Parser = .{ .osc_5522 = &osc };
+    _ = try parser.parse("\x1b]5522;partial", null);
+    _ = try parser.parse("\x1b[200~", null);
+    _ = try parser.parse("\x1b[200~", null);
+    try testing.expectEqual(@as(?Event, null), (try parser.parse("\x1b\\", null)).event);
+    try testing.expect(osc.inProgress());
+    try testing.expectEqual(@as(?Event, null), (try parser.parse("tail", null)).event);
+    try testing.expectEqual(@as(?Event, null), (try parser.parse("\x1b[201~", null)).event);
+    try testing.expect(!osc.inProgress());
+    try testing.expectEqual('z', (try parser.parse("z", null)).event.?.key_press.codepoint);
+}
+
+test "OSC 5522 paste quarantine sanitizes recovery keys and rejects editing bytes" {
+    var osc: Osc5522 = .{};
+    var parser: Parser = .{ .osc_5522 = &osc };
+    _ = try parser.parse("\x1b]5522;partial", null);
+    _ = try parser.parse("\x1b[200~", null);
+    _ = try parser.parse("\x1b[200~", null);
+    for ([_][]const u8{ "\r", "\n", "\t", "\x7f", "\x1b[I", "\x1b[120;3;120u", "\x1b[120;5;120u" }) |input| {
+        const rejected = try parser.parse(input, null);
+        try testing.expectEqual(input.len, rejected.n);
+        try testing.expectEqual(@as(?Event, null), rejected.event);
+    }
+    for ([_]struct { input: []const u8, code: u21 }{
+        .{ .input = "\x1b[27;1;120u", .code = Key.escape },
+        .{ .input = "\x1b[57352;1;120u", .code = Key.up },
+    }) |case| {
+        const recovered = try parser.parse(case.input, null);
+        try testing.expectEqual(case.code, recovered.event.?.key_press.codepoint);
+        try testing.expectEqual(@as(?[]const u8, null), recovered.event.?.key_press.text);
+    }
+    try testing.expectEqual(@as(?Event, null), (try parser.parse("\x1b[201~", null)).event);
+    try testing.expectEqual(@as(?Event, null), (try parser.parse("\x1b\\", null)).event);
+    try testing.expect(!osc.inProgress());
+}
+
+test "OSC 5522 quarantine requires exact paste markers" {
+    const start = "\x1b[200~";
+    const finish = "\x1b[201~";
+    for (1..start.len) |split| {
+        var osc: Osc5522 = .{};
+        var parser: Parser = .{ .osc_5522 = &osc };
+        _ = try parser.parse("\x1b]5522;partial", null);
+        _ = try parser.parse(start, null);
+        try testing.expectEqual(0, (try parser.parse(start[0..split], null)).n);
+        try testing.expectEqual(start.len, (try parser.parse(start, null)).n);
+        _ = try parser.parse("\x1b\\", null);
+        try testing.expect(osc.inProgress());
+        for ([_][]const u8{ "\x1b[201;99~", "\x1b\x1b[201~" }) |fake| {
+            const result = try parser.parse(fake, null);
+            try testing.expectEqual(fake.len, result.n);
+            try testing.expectEqual(@as(?Event, null), result.event);
+            try testing.expect(osc.inProgress());
+        }
+        const text = try parser.parse("tail", null);
+        try testing.expectEqual(4, text.n);
+        try testing.expectEqual(@as(?Event, null), text.event);
+        try testing.expectEqual(0, (try parser.parse(finish[0..split], null)).n);
+        try testing.expectEqual(finish.len, (try parser.parse(finish, null)).n);
+        try testing.expect(!osc.inProgress());
+    }
+}
+
+test "OSC 5522 quarantine rejects malformed and mouse CSI" {
+    var osc: Osc5522 = .{};
+    var parser: Parser = .{ .osc_5522 = &osc };
+    _ = try parser.parse("\x1b]5522;partial", null);
+    _ = try parser.parse("\x1b[200~", null);
+    _ = try parser.parse("\x1b[200~", null);
+    for ([_][]const u8{ "\x1b[c", "\x1b[M" }) |bad| {
+        const result = try parser.parse(bad, null);
+        try testing.expectEqual(bad.len, result.n);
+        try testing.expectEqual(@as(?Event, null), result.event);
+        try testing.expect(osc.inProgress());
+    }
+    try testing.expectEqual(@as(?Event, null), (try parser.parse("\x1b[201~", null)).event);
+    try testing.expectEqual(@as(?Event, null), (try parser.parse("\x1b\\", null)).event);
     try testing.expect(!osc.inProgress());
 }
