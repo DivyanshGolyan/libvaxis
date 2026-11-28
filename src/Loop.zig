@@ -204,7 +204,7 @@ pub fn Loop(comptime T: type) type {
                         var seq_start: usize = 0;
                         while (seq_start < n) {
                             if (n - seq_start == 1 and buf[seq_start] == 0x1b and !osc_5522.inProgress()) {
-                                if (bufferEscape(self.tty.fd.handle, self.disambiguated_input.load(.acquire), PosixPoll{})) {
+                                if (retainEscapePrefix(self.tty.fd.handle, self.disambiguated_input.load(.acquire), PosixPoll{})) {
                                     buf[0] = buf[seq_start];
                                     read_start = 1;
                                     continue :read_loop;
@@ -252,16 +252,17 @@ const PosixPoll = struct {
     }
 };
 
-fn bufferEscape(fd: std.posix.fd_t, disambiguated: bool, poller: anytype) bool {
+fn retainEscapePrefix(fd: std.posix.fd_t, disambiguated: bool, poller: anytype) bool {
+    // Report-all mode encodes the Escape key as CSI. A bare ESC is a
+    // sequence opener, including when its continuation arrives much later.
+    if (disambiguated) return true;
+
     var fds = [1]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 }};
-    // In report-all mode Escape is encoded as CSI. Allow a short read
-    // boundary before treating a bare ESC as a key.
-    const timeout: i32 = if (disambiguated) 25 else 0;
-    _ = poller.wait(&fds, timeout) catch 0;
+    _ = poller.wait(&fds, 0) catch 0;
     return fds[0].revents & std.posix.POLL.IN != 0;
 }
 
-test "OSC 5522 Escape disambiguation respects its read deadline" {
+test "OSC 5522 report-all Escape survives a delayed read without changing legacy input" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const Poll = struct {
         arrival_ms: ?i32,
@@ -276,12 +277,12 @@ test "OSC 5522 Escape disambiguation respects its read deadline" {
     for ([_]struct { enabled: bool, arrival: ?i32, retain: bool }{
         .{ .enabled = true, .arrival = 1, .retain = true },
         .{ .enabled = true, .arrival = 25, .retain = true },
-        .{ .enabled = true, .arrival = 26, .retain = false },
-        .{ .enabled = true, .arrival = null, .retain = false },
+        .{ .enabled = true, .arrival = 80, .retain = true },
+        .{ .enabled = true, .arrival = null, .retain = true },
         .{ .enabled = false, .arrival = 0, .retain = true },
         .{ .enabled = false, .arrival = 1, .retain = false },
     }) |case| {
-        try std.testing.expectEqual(case.retain, bufferEscape(0, case.enabled, Poll{ .arrival_ms = case.arrival }));
+        try std.testing.expectEqual(case.retain, retainEscapePrefix(0, case.enabled, Poll{ .arrival_ms = case.arrival }));
     }
 }
 
