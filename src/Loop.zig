@@ -178,6 +178,7 @@ pub fn Loop(comptime T: type) type {
             switch (builtin.os.tag) {
                 .windows => try self.runWindows(self.tty, paste_allocator),
                 else => {
+                    var clipboard_supported = false;
                     var osc_5522: Parser.Osc5522 = .{};
                     if (@hasField(Event, "osc_5522")) parser.osc_5522 = &osc_5522;
 
@@ -204,7 +205,8 @@ pub fn Loop(comptime T: type) type {
                         var seq_start: usize = 0;
                         while (seq_start < n) {
                             if (n - seq_start == 1 and buf[seq_start] == 0x1b and !osc_5522.inProgress()) {
-                                if (retainEscapePrefix(self.tty.fd.handle, self.disambiguated_input.load(.acquire), PosixPoll{})) {
+                                const disambiguated = self.disambiguated_input.load(.acquire);
+                                if (retainEscapePrefix(self.tty.fd.handle, disambiguated, clipboard_supported, PosixPoll{})) {
                                     buf[0] = buf[seq_start];
                                     read_start = 1;
                                     continue :read_loop;
@@ -237,6 +239,9 @@ pub fn Loop(comptime T: type) type {
                             seq_start += result.n;
 
                             const event = result.event orelse continue;
+                            if (event == .clipboard_protocol) {
+                                clipboard_supported = parser.osc_5522 != null and event.clipboard_protocol;
+                            }
                             try handleEventGeneric(self, self.vaxis, &self.cache, Event, event, paste_allocator);
                         }
                     }
@@ -252,13 +257,13 @@ const PosixPoll = struct {
     }
 };
 
-fn retainEscapePrefix(fd: std.posix.fd_t, disambiguated: bool, poller: anytype) bool {
-    // Report-all mode encodes the Escape key as CSI. A bare ESC is a
-    // sequence opener, including when its continuation arrives much later.
-    if (disambiguated) return true;
+fn retainEscapePrefix(fd: std.posix.fd_t, disambiguated: bool, clipboard_supported: bool, poller: anytype) bool {
+    // A terminal which reports keys as CSI and supports clipboard replies
+    // can send a delayed sequence opener without it being a physical key.
+    if (disambiguated and clipboard_supported) return true;
 
     var fds = [1]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 }};
-    _ = poller.wait(&fds, 0) catch 0;
+    _ = poller.wait(&fds, if (disambiguated) 25 else 0) catch 0;
     return fds[0].revents & std.posix.POLL.IN != 0;
 }
 
@@ -274,15 +279,17 @@ test "SUI-196 OSC 5522 report-all Escape survives a delayed read without changin
             return 0;
         }
     };
-    for ([_]struct { enabled: bool, arrival: ?i32, retain: bool }{
-        .{ .enabled = true, .arrival = 1, .retain = true },
-        .{ .enabled = true, .arrival = 25, .retain = true },
-        .{ .enabled = true, .arrival = 80, .retain = true },
-        .{ .enabled = true, .arrival = null, .retain = true },
-        .{ .enabled = false, .arrival = 0, .retain = true },
-        .{ .enabled = false, .arrival = 1, .retain = false },
+    for ([_]struct { report_all: bool, clipboard: bool, arrival: ?i32, retain: bool }{
+        .{ .report_all = true, .clipboard = true, .arrival = 80, .retain = true },
+        .{ .report_all = true, .clipboard = true, .arrival = null, .retain = true },
+        .{ .report_all = true, .clipboard = false, .arrival = 25, .retain = true },
+        .{ .report_all = true, .clipboard = false, .arrival = 26, .retain = false },
+        .{ .report_all = true, .clipboard = false, .arrival = null, .retain = false },
+        .{ .report_all = false, .clipboard = true, .arrival = null, .retain = false },
+        .{ .report_all = false, .clipboard = false, .arrival = 0, .retain = true },
+        .{ .report_all = false, .clipboard = false, .arrival = 1, .retain = false },
     }) |case| {
-        try std.testing.expectEqual(case.retain, retainEscapePrefix(0, case.enabled, Poll{ .arrival_ms = case.arrival }));
+        try std.testing.expectEqual(case.retain, retainEscapePrefix(0, case.report_all, case.clipboard, Poll{ .arrival_ms = case.arrival }));
     }
 }
 
