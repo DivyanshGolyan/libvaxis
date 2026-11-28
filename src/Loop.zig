@@ -262,7 +262,7 @@ fn retainEscapePrefix(fd: std.posix.fd_t, disambiguated: bool, poller: anytype) 
     return fds[0].revents & std.posix.POLL.IN != 0;
 }
 
-test "SUI-194 OSC 5522 report-all Escape survives a delayed read without changing legacy input" {
+test "SUI-196 OSC 5522 report-all Escape survives a delayed read without changing legacy input" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const Poll = struct {
         arrival_ms: ?i32,
